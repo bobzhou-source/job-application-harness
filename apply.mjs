@@ -1915,6 +1915,12 @@ async function run() {
       }
       await browser.markTab(page, url);
       const current = await observe(page);
+      // The job board itself refusing the applicant's account (Handshake's /deactivated "Account Blocked" after an
+      // "Interaction limit hit") ends every application on it, not just this posting.
+      if (new URL(page.url()).host === posting.host && (/\/(deactivated|suspended|blocked)\/?$/i.test(new URL(page.url()).pathname)
+        || /\b(your )?account (is|has been) (temporarily |permanently )?(blocked|suspended|deactivated|locked)\b/i.test(String(current.pageText ?? '').slice(0, 1500)))) {
+        throw new Stop(`account-blocked (opened ${new URL(page.url()).host}${new URL(page.url()).pathname}): the job board blocked the account`);
+      }
       // A posting URL carrying its own id (/jobs/11392334) that opens on the same site without that id was taken down
       // and redirected (often to a search list of other jobs): stop instead of applying to whatever is listed there.
       // (A recorded tab may already be on the employer's own site, which legitimately lacks the id.)

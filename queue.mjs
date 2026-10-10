@@ -102,6 +102,14 @@ while (handled < limit) {
       const secs = Math.round((Date.now() - started) / 1000);
       const reason = run?.reason ?? `no summary (killed after ${RUN_SECONDS}s or crashed)`;
       if (run?.outcome === 'submitted') { record(`SUBMITTED secs=${secs} cost=$${run.cost?.toFixed(4)}`); break; }
+      // A blocked job-board account fails every remaining posting the same way and more traffic prolongs the block:
+      // the queue ends here, keeping this posting queued.
+      if (/^account-blocked/.test(reason)) {
+        record(`STOPPED (${reason.slice(0, 200)}) secs=${secs}\nQUEUE_HALTED account-blocked`);
+        notify(`Job board account blocked: ${reason.slice(0, 80)} — queue halted`);
+        record('QUEUE_DONE');
+        process.exit(0);
+      }
       record(`STOPPED (${reason.slice(0, 200)}) secs=${secs}`);
       if (retried) break;
       if (GATE.test(reason)) {

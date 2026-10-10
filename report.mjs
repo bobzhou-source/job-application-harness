@@ -108,6 +108,7 @@ function category(row) {
   if (row.outcome === 'submitted') return ['submitted', ''];
   const table = [
     [/captcha-rejected/i, 'captcha-rejected', 'user: apply in normal browser'],
+    [/^account-blocked/i, 'account-blocked', 'user: contact job-board support'],
     [/already (applied|submitted)|application (is already|was) submitted/i, 'already-applied', ''],
     [/^site-down/i, 'site-down', 'rerun later'],
     [/posting-unavailable|no longer (available|accepting)|registration is closed|posting (is )?closed|no (job )?openings|could not be found|page you are looking for|no .*matching the target role|no link matching|all n(ot|on)[- ]matching|contain no /i, 'posting-gone', ''],
