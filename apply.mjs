@@ -1623,7 +1623,11 @@ async function run() {
       if (!target) invalidPlan(`stale-target ${labelOf(field)}`);
       if (listItem && choicesFor(fresh, target.ref).some(option => option.multi)) throw new MultiList();
       typed[target.ref] = value;
-      const equivalent = aliasesFor(key, value).map(answers.normalize);
+      // The registry's answer to exactly this question ("Nationality" → "American") is the last equivalent of the
+      // planned value (facts.country "United States"), for lists that phrase the answer that way.
+      const asked = values.get(`qa.${answers.normalize(labelOf(field))}`);
+      const candidates = [...new Set([...aliasesFor(key, value), ...(typeof asked === 'string' && asked.trim() ? [asked] : [])])];
+      const equivalent = candidates.map(answers.normalize);
       // A suggestion that extends the stored answer ("42 Oak Street" → "42 OAK STREET, FAIRVIEW, OREGON, 97000") is the
       // same answer with context; among several, the one naming the most other stored facts
       // (city, ZIP) wins.
@@ -1670,7 +1674,7 @@ async function run() {
               if (listed.length || wait >= 6) return listed;
             }
           };
-          for (const search of [...new Set([...aliasesFor(key, value), value.trim().split(/\s+/)[0]])]) {
+          for (const search of [...new Set([...candidates, value.trim().split(/\s+/)[0]])]) {
             await mutate('FILL', labelOf(searchBox), () => act.type(page, searchBox.ref, search, { secret: true }));
             const filtered = await settled();
             if (exact(filtered.map(option => option.label))) { shown = filtered; break; }
@@ -1687,7 +1691,7 @@ async function run() {
         // The answer, then each stored alias, then its first word: a list without "Computer Engineering" may list
         // "Engineering". Search-on-Enter widgets (prompt fields) show nothing new until Enter (an open prompt keeps its
         // unfiltered list on screen), and remote lookups lag.
-        for (const search of [...new Set([...aliasesFor(key, value), value.trim().split(/\s+/)[0]])]) {
+        for (const search of [...new Set([...candidates, value.trim().split(/\s+/)[0]])]) {
           const unfiltered = JSON.stringify(shown.map(option => option.label));
           await mutate('FILL', labelOf(target), () => act.type(page, target.ref, search, { secret: true }));
           let entered = false;
@@ -1706,7 +1710,7 @@ async function run() {
           // away: "Computer Science" narrowing to "Computer and Information Science" beats a later alias's list.
           const real = shown.filter(option => !LIST_STATUS.test(clean(option.label)));
           if (real.length && JSON.stringify(shown.map(option => option.label)) !== unfiltered) {
-            preferred = await chooseOption(labelOf(field), value, real.map(option => option.label), aliasesFor(key, value));
+            preferred = await chooseOption(labelOf(field), value, real.map(option => option.label), candidates);
             if (preferred) break;
           }
         }
@@ -1715,7 +1719,7 @@ async function run() {
         // is the search cleared and the full list offered instead (long lists render just their first entries, so
         // the filtered one is preferred).
         if (!preferred && shown.length && !exact(shown.map(option => option.label))) {
-          preferred = await chooseOption(labelOf(field), value, shown.map(option => option.label), aliasesFor(key, value));
+          preferred = await chooseOption(labelOf(field), value, shown.map(option => option.label), candidates);
         }
         if (!preferred && (!shown.length || !exact(shown.map(option => option.label)))) {
           await mutate('FILL', labelOf(target), () => act.type(page, target.ref, '', { secret: true }));
@@ -1753,8 +1757,8 @@ async function run() {
         // Exact matches are checked against every option (an alias like "BA" shares no word with the answer, so a
         // long list trimmed by the answer's words drops it); the model chooses from the trimmed list only.
         const all = await act.selectOptions(page, target.ref, value, Infinity);
-        const listed = all.length > 40 ? await act.selectOptions(page, target.ref, [value, ...aliasesFor(key, value)].join(' ')) : all;
-        let option = exact(all) ?? (listed.length ? await chooseOption(labelOf(field), value, listed, aliasesFor(key, value)) : null);
+        const listed = all.length > 40 ? await act.selectOptions(page, target.ref, candidates.join(' ')) : all;
+        let option = exact(all) ?? (listed.length ? await chooseOption(labelOf(field), value, listed, candidates) : null);
         // The key's value names no option (a follow-up "Source" listing campuses under "How did you hear: Campus"):
         // the writer picks the one option the applicant facts support, with the field's own context, once per field.
         const real = all.filter(choice => !PLACEHOLDER_OPTION.test(String(choice))).map(String);
@@ -1779,7 +1783,7 @@ async function run() {
         const label = exact(shown.map(option => option.label))
           ?? (preferred && shown.some(option => option.label === preferred) ? preferred : null)
           ?? (depth > 0 && shown.length === 1 ? shown[0].label : null)
-          ?? await chooseOption(labelOf(field), value, shown.map(option => option.label), aliasesFor(key, value));
+          ?? await chooseOption(labelOf(field), value, shown.map(option => option.label), candidates);
         preferred = null;
         const option = shown.find(candidate => candidate.label === label);
         if (!option) needsField(field, `no owned option matches the stored answer or its aliases (shown: ${shown.slice(0, 6).map(candidate => `"${clean(candidate.label).slice(0, 40)}"`).join(', ')})`);
