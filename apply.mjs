@@ -2401,7 +2401,14 @@ async function run() {
         source = 'deepseek';
         if (outcome.plan.action === 'write') {
           const fields = await writeFor(current, outcome.plan.refs);
-          if (!fields.length) continue;
+          // Identity/credential boxes (username, codes, signatures) are never composed: say so, or the planner re-plans
+          // the same write forever.
+          if (!fields.length) {
+            say(`REFUSED write ${outcome.plan.refs.join(',')} (identity/credential box); re-driving`);
+            history.push(`refused write ${outcome.plan.refs.join(',')}: usernames, codes and signatures are never composed; fill them from a stored answer, or the applicant must choose one`);
+            queued = [];
+            continue;
+          }
           outcome.plan = { action: 'fill', fields };
         }
       } else {
