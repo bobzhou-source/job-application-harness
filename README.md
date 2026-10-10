@@ -150,7 +150,7 @@ The complete schema is:
     "profileDir": "~/.job-app-chrome",
     "debugHost": "127.0.0.1",
     "debugPort": 0,
-    "maxTabs": 8
+    "maxTabs": 4
   },
   "resumes": {
     "directory": "~/Documents/resumes",
@@ -242,7 +242,7 @@ The complete schema is:
 - `profileDir`: dedicated automation profile.
 - `debugHost`: must remain a loopback address.
 - `debugPort`: integer from `0` through `65535`; `0` uses Chrome’s dynamic port file.
-- `maxTabs`: maximum tabs retained by the automation browser; default `8`.
+- `maxTabs`: maximum tabs retained by the automation browser; default `4`. Each tab is a Chrome renderer (roughly 150–300 MB), so keep this low on 8–16 GB machines.
 
 ### Resumes and documents
 

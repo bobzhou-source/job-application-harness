@@ -4,7 +4,7 @@
     "profileDir": "~/.job-app-chrome",
     "debugHost": "127.0.0.1",
     "debugPort": 0,
-    "maxTabs": 8
+    "maxTabs": 4
   },
   "resumes": {
     "directory": "~/Documents/resumes",
