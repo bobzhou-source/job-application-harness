@@ -271,9 +271,10 @@ function activeFields(current) {
     }
   }
   // An active form holding no fields at all (its inputs render outside the <form>: ADP's sign-in Email box beside a
-  // form wrapping only Continue) owns the screen's formless fields.
+  // form wrapping only Continue) owns the screen's formless fields. A formless box the site flags invalid (Workday's
+  // optional "LinkedIn:" beside the Websites form) blocks the step's save, so it is the step's too.
   const fieldless = refs.size && !fields.some(field => refs.has(field.formRef));
-  return refs.size ? fields.filter(field => refs.has(field.formRef) || (!field.formRef && (field.required || fieldless))) : fields;
+  return refs.size ? fields.filter(field => refs.has(field.formRef) || (!field.formRef && (field.required || field.invalid || fieldless))) : fields;
 }
 // A control inside a newsletter/email-updates block (its "Submit"/"Sign up") subscribes the applicant; one owned by
 // an application form (3+ active fields) is that form's own, even beside a "Sign up for job alerts" box. So is one in
@@ -2307,7 +2308,15 @@ async function run() {
           const why = isEmpty(field) ? 'the site cleared the accepted fill' : field.invalid ? 'the site rejected the accepted fill' : 'the field did not change';
           say(`FILL no progress "${labelOf(field)}" (${state.failures}): ${why}`);
           if (state.recovered) needsField(field, `${why} after opening and picking an owned option`);
-          if (state.failures >= 2 && !isChoiceField(field)) needsField(field, `${why} twice`);
+          if (state.failures >= 2 && !isChoiceField(field)) {
+            // An optional box abandoned while still holding the value the site rejects blocks the step's save: it is
+            // left blank, as abandoning means.
+            if (!field.required && field.invalid && !isEmpty(field)) {
+              await mutate('FILL', labelOf(field), () => act.type(page, field.ref, '', { secret: true })).catch(() => {});
+              say(`CLEARED rejected optional "${labelOf(field)}"`);
+            }
+            needsField(field, `${why} twice`);
+          }
           if (state.failures >= 2) {
             state.recovered = true;
             say(`FILL recovering "${labelOf(field)}" through owned options`);
@@ -2319,6 +2328,15 @@ async function run() {
         }
       }
       if (recoveredFill) continue;
+      // A rejected box already holding exactly a stored answer (entered on an earlier run, or by the site from the
+      // profile) is that answer's fill: it gets the same replacement attempt as one filled on this run.
+      for (const field of activeFields(current)) {
+        if ((!field.invalid && !rejectionFor(current, labelOf(field))) || isEmpty(field) || field.autocomplete || labelOf(field) in filledKeys) continue;
+        const shown = clean(field.value);
+        const stored = [...values].find(([name, value]) => /^(facts|qa)\./.test(name) && !/\.(alt|alias)_\d+$/.test(name)
+          && typeof value === 'string' && clean(value) === shown);
+        if (stored) filledKeys[labelOf(field)] = stored[0];
+      }
       for (const [label, key] of Object.entries(filledKeys)) {
         const message = rejectionFor(current, label);
         const field = current.fields.find(candidate => labelOf(candidate) === label);
