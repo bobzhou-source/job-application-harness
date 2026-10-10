@@ -29,6 +29,12 @@
       "primaryStartMonths": ["May", "Jun", "Jul"],
       "shortTermStartMonth": "Jan",
       "shortTermEndMonths": ["Jan", "Feb"]
+    },
+    "sources": ["handshake"],
+    "listings": {
+      "url": "https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/.github/scripts/listings.json",
+      "terms": ["Summer 2027"],
+      "locationPattern": ",\\s*[A-Z]{2}$|\\bUSA\\b|remote$"
     }
   },
   "models": {

@@ -53,9 +53,10 @@ function inSeason(meta) {
 export function jobId(url) {
   return String(url).match(JOB_ID)?.[1] ?? null;
 }
-// A posting's identity across runs: its Handshake id, else its URL without query or fragment.
+// A posting's identity across runs: its Handshake id, else its URL without scheme, query, fragment, or an
+// /apply… suffix (an employer's posting and its application form are one posting).
 export function jobKey(url) {
-  return jobId(url) ?? (url ? String(url).replace(/[?#].*$/, '') : null);
+  return jobId(url) ?? (url ? String(url).replace(/^https?:\/\//i, '').replace(/[?#].*$/, '').replace(/\/apply(\/.*)?$/i, '').replace(/\/+$/, '').toLowerCase() : null);
 }
 
 // Per posting, from every recorded run: done (submitted, closed, or already applied) and how many runs stopped.
@@ -72,6 +73,11 @@ export function jobHistory() {
     if (row.outcome === 'submitted' || TERMINAL.test(row.reason ?? '')) entry.done = true;
     else entry.stopped += 1;
     runs.set(key, entry);
+    // The employer posting a Handshake run applied through is the same posting when a listings feed links to it.
+    const employerKey = row.employerPosting && jobKey(row.employerPosting);
+    if (employerKey && employerKey !== key && entry.done) {
+      runs.set(employerKey, { stopped: runs.get(employerKey)?.stopped ?? 0, done: true, submitted: entry.submitted || !!runs.get(employerKey)?.submitted });
+    }
   }
   return runs;
 }
@@ -103,12 +109,45 @@ async function main() {
   const queue = readQueue();
   const queued = new Set(queue.map(row => jobKey(row.url)).filter(Boolean));
   const found = [];
-  const take = (id, lane, name, source) => {
-    if (!id || spent.has(id) || queued.has(id) || found.length >= max) return;
-    queued.add(id);
-    found.push({ url: `${HANDSHAKE}/jobs/${id}`, lane, name: name.replace(/\s+/g, ' ').replace(/\t/g, ' ').trim().slice(0, 90), source });
+  const take = (key, lane, name, source, url = `${HANDSHAKE}/jobs/${key}`) => {
+    if (!key || spent.has(key) || queued.has(key) || found.length >= max) return;
+    queued.add(key);
+    found.push({ url, lane, name: name.replace(/\s+/g, ' ').replace(/\t/g, ' ').trim().slice(0, 90), source });
   };
+  const fits = (title, employer) => RELEVANT.test(title) && !UNFIT.test(title) && !(EXCLUDED_EMPLOYER && EXCLUDED_EMPLOYER.test(employer));
 
+  if (CONFIG.discovery.sources.includes('listings')) await fromListings({ take, fits, max, found });
+  if (CONFIG.discovery.sources.includes('handshake') && found.length < max) {
+    await fromHandshake({ take, fits, spent, queued, queries, pages, max, found, dryRun });
+  }
+
+  for (const row of found) console.log(`${row.lane}\t${row.name}\t${row.url}\t(${row.source})`);
+  console.log(`${found.length} new posting(s)${dryRun ? ' (dry run, queue unchanged)' : ` queued in ${QUEUE_FILE}`}`);
+  if (!dryRun) writeQueue([...queue, ...found]);
+  process.exit(0);
+}
+
+// A public listings feed: open postings in a configured term and location, newest first, linking straight to the
+// employer's own application.
+async function fromListings({ take, fits, max, found }) {
+  const { url, terms, locationPattern } = CONFIG.discovery.listings;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`listings feed ${url} answered HTTP ${response.status}`);
+  const listings = await response.json();
+  const located = new RegExp(locationPattern, 'i');
+  const open = listings.filter(listing => listing.active && listing.is_visible !== false && typeof listing.url === 'string'
+    && /^https:/.test(listing.url) && (listing.terms ?? []).some(term => terms.includes(term))
+    && (listing.locations ?? []).some(location => located.test(location))
+    && (!Array.isArray(listing.degrees) || !listing.degrees.length || listing.degrees.some(degree => /bachelor/i.test(degree)))
+    && fits(String(listing.title ?? ''), String(listing.company_name ?? '')));
+  open.sort((a, b) => (b.date_posted ?? 0) - (a.date_posted ?? 0));
+  for (const listing of open) {
+    if (found.length >= max) break;
+    take(jobKey(listing.url), laneFor(listing.title, listing.company_name), `${listing.company_name} — ${listing.title}`, 'listings', listing.url);
+  }
+}
+
+async function fromHandshake({ take, fits, spent, queued, queries, pages, max, found, dryRun }) {
   const connection = await browser.connect();
   try {
     // Postings the user opened: queued whatever their role (the user picked them), then closed.
@@ -143,8 +182,7 @@ async function main() {
           }));
           if (!cards.length) break;
           for (const card of cards) {
-            if (!/\binternship\b/i.test(card.meta) || !inSeason(card.meta)) continue;
-            if (!RELEVANT.test(card.title) || UNFIT.test(card.title) || (EXCLUDED_EMPLOYER && EXCLUDED_EMPLOYER.test(card.employer))) continue;
+            if (!/\binternship\b/i.test(card.meta) || !inSeason(card.meta) || !fits(card.title, card.employer)) continue;
             if (found.length >= quota) break;
             take(jobId(`${HANDSHAKE}${card.href}`), laneFor(card.title, card.employer), `${card.employer} — ${card.title}`, query);
           }
@@ -156,11 +194,6 @@ async function main() {
   } finally {
     connection.disconnect();
   }
-
-  for (const row of found) console.log(`${row.lane}\t${row.name}\t${row.url}\t(${row.source})`);
-  console.log(`${found.length} new posting(s)${dryRun ? ' (dry run, queue unchanged)' : ` queued in ${QUEUE_FILE}`}`);
-  if (!dryRun) writeQueue([...queue, ...found]);
-  process.exit(0);
 }
 
 if (import.meta.main) await main();

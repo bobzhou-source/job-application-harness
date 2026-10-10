@@ -110,7 +110,7 @@ A stopped run keeps its application page open. A confirmed submitted run closes 
 bun discover.mjs [--query "software engineer intern"]... [--pages 2] [--max 40] [--dry-run]
 ```
 
-Discovery uses the configured Handshake base URL, queries, title filters, resume lanes, and season rules. It appends new rows to the ignored `queue.tsv` as:
+Discovery uses the configured sources (Handshake searches and/or a public listings feed), title filters, resume lanes, and season rules. It appends new rows to the ignored `queue.tsv` as:
 
 ```text
 url<TAB>lane<TAB>name
@@ -264,6 +264,8 @@ When a lane variant has a LaTeX source beside it (`resume_general.tex` next to `
 - `lanes`: ordered lane names and title patterns; the first matching lane wins.
 - `specialLane`: an employer pattern checked before title lanes.
 - `season`: primary start months plus an optional short-term start/end window.
+- `sources` (optional, default `["handshake"]`): `handshake` searches the configured Handshake site; `listings` reads a public internship listings feed and queues the employer's own posting URLs.
+- `listings` (required with the `listings` source): `url` of a JSON array in the SimplifyJobs `listings.json` format (`company_name`, `title`, `url`, `active`, `is_visible`, `terms`, `locations`, optional `degrees`), the `terms` to accept (`["Summer 2027"]`), and a `locationPattern` regular expression one listed location must match. Listings are queued newest first; postings an earlier Handshake run already applied through are skipped.
 
 Lane names must be unique, nonempty, and safe for both `queue.tsv` and filename substitution. All configured regular expressions must compile.
 

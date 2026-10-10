@@ -1555,7 +1555,14 @@ async function run() {
       const same = activeFields(snap).filter(candidate => ['tag', 'type', 'label', 'name'].every(key => candidate[key] === field[key]));
       return same.length === 1 ? same[0] : null;
     };
-    const aliasesFor = (key, value) => [value, ...[...values].filter(([name]) => name.startsWith(`${baseKey(key)}.alias_`)).map(([, alias]) => alias)];
+    // An answer's equivalents are its own aliases plus those of any fact stating the same value (qa "veteran status"
+    // = facts.veteran_status's "I am not a protected veteran" shares its "I am not a veteran" alias).
+    const aliasesFor = (key, value) => {
+      const same = [...values].filter(([name, stored]) => name.startsWith('facts.') && !/\.(alt|alias)_\d+$/.test(name)
+        && typeof stored === 'string' && typeof value === 'string' && answers.normalize(stored) === answers.normalize(value)).map(([name]) => name);
+      const bases = new Set([baseKey(key), ...same]);
+      return [value, ...[...values].filter(([name]) => [...bases].some(base => name.startsWith(`${base}.alias_`))).map(([, alias]) => alias)];
+    };
 
     async function openField(current, field) {
       const fresh = await freshSnapshot(current);
