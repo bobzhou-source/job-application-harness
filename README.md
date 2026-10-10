@@ -260,6 +260,7 @@ When a lane variant has a LaTeX source beside it (`resume_general.tex` next to `
 - `handshakeBaseUrl`: HTTPS origin with no credentials, query, or fragment.
 - `queries`: default search terms used when no CLI query is supplied.
 - `includeTitlePattern` and `excludeTitlePattern`: regular-expression strings applied to titles.
+- `excludeEmployerPattern` (optional): regular-expression string applied to employer names; matching postings are never queued (employers you apply to by hand or have paused).
 - `lanes`: ordered lane names and title patterns; the first matching lane wins.
 - `specialLane`: an employer pattern checked before title lanes.
 - `season`: primary start months plus an optional short-term start/end window.

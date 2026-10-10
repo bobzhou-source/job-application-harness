@@ -28,6 +28,7 @@ function compile(pattern, field) {
 
 const RELEVANT = compile(CONFIG.discovery.includeTitlePattern, 'includeTitlePattern');
 const UNFIT = compile(CONFIG.discovery.excludeTitlePattern, 'excludeTitlePattern');
+const EXCLUDED_EMPLOYER = CONFIG.discovery.excludeEmployerPattern ? compile(CONFIG.discovery.excludeEmployerPattern, 'excludeEmployerPattern') : null;
 
 // Resume variant by the role's title (first match wins); the configured special employer lane wins over titles.
 const LANES = CONFIG.discovery.lanes.map(({ name, titlePattern }) => [name, compile(titlePattern, `lanes.${name}.titlePattern`)]);
@@ -143,7 +144,7 @@ async function main() {
           if (!cards.length) break;
           for (const card of cards) {
             if (!/\binternship\b/i.test(card.meta) || !inSeason(card.meta)) continue;
-            if (!RELEVANT.test(card.title) || UNFIT.test(card.title)) continue;
+            if (!RELEVANT.test(card.title) || UNFIT.test(card.title) || (EXCLUDED_EMPLOYER && EXCLUDED_EMPLOYER.test(card.employer))) continue;
             if (found.length >= quota) break;
             take(jobId(`${HANDSHAKE}${card.href}`), laneFor(card.title, card.employer), `${card.employer} — ${card.title}`, query);
           }
