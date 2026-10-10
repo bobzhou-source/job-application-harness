@@ -1391,7 +1391,12 @@ async function run() {
         if (fieldType(field) === 'textarea') {
           values.set(key, written[field.ref]);
           essayKeys.add(key);
-        } else remember(labelOf(field), written[field.ref], true);
+        } else {
+          // Saved for later runs only when the label is a real question; this run fills the written answer either way
+          // (a bare "County" label is not stored, yet its answer must reach the fill).
+          remember(labelOf(field), written[field.ref], true);
+          values.set(key, written[field.ref]);
+        }
         fills.push({ ref: field.ref, key });
       }
       say(`WRITER ${fills.length}/${fields.length} answers (${clean(fields.map(labelOf).join('; ')).slice(0, 160)})`);
