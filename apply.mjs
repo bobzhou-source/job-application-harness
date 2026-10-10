@@ -439,7 +439,8 @@ function currentControl(current, ref, { moreEntries = false } = {}) {
   // An apply entry naming a role ("Apply Now Client Delivery Intern - Breakthrough") opens that posting: one naming
   // a role other than this run's posting is refused (a bare "Apply"/"Apply now" or one naming a requisition id passes).
   if (kind === 'apply-entry' && targetRole) {
-    const words = text => answers.normalize(text).split(' ')
+    // Screen-reader notes ("Apply now (link opens in new tab)") are not role words.
+    const words = text => answers.normalize(String(text).replace(/\(?\b(link )?opens? in (a )?new (tab|window)\b\)?/gi, ' ')).split(' ')
       .filter(word => word.length > 1 && !/^(apply|now|for|to|the|this|job|position|role|on|and|of|at|in|intern|interns|internship|internships|summer|fall|spring|winter|program|20\d\d|externally|external|company|companys|employer|employers|website|site|application|start|step|with|here|click|view|online|today|opening|our|your|career|careers)$/.test(word));
     // A popup-style apply button's label carries neighbouring text ("Create Alert Apply now"); its own text is `current`.
     const named = words(control.current !== undefined && /\bapply\b/i.test(control.current) ? control.current : control.label);
@@ -553,8 +554,10 @@ function currentField(current, ref, correction = null) {
   // the other.
   const shown = answers.normalize(field.value);
   const fact = correction && typeof correction.value === 'string' ? answers.normalize(correction.value) : '';
-  const contradicts = correction && /^facts\./.test(correction.key) && fact && !shown.includes(fact)
-    && (!isChoiceField(field) || !fact.includes(shown));
+  const contradicts = correction && fact && ((/^facts\./.test(correction.key) && !shown.includes(fact)
+    && (!isChoiceField(field) || !fact.includes(shown)))
+    // A catch-all choice ("Other") an earlier run picked is replaced by a stored answer that names something concrete.
+    || (isChoiceField(field) && /^(other|others)$/.test(shown) && !/^other\b/.test(fact)));
   if (!isEmpty(field) && !field.invalid && !contradicts && (field.valueLength ?? String(field.value ?? '').length) <= limitOf(field)) invalidPlan('occupied-field');
   return field;
 }
@@ -834,6 +837,22 @@ async function run() {
       // An earlier submission (no submit click in this run) had its own inbox window.
       if (!submitAt || /(^|\.)joinhandshake\.com$/i.test(new URL(site).hostname)) return;
       phase = 'post-submit-email';
+      // Some sites (Oracle Recruiting) confirm the applicant's identity with an emailed code right after submit
+      // ("so that your job application is considered"): code boxes appear on the confirmation page a beat later.
+      await delay(4000);
+      const after = await observe(page).catch(() => null);
+      if (after && emailCodeFields(after).length) {
+        await enterEmailedCode(after);
+        const typed = await observe(page);
+        const verify = typed.controls.find(control => /^(verify|confirm|continue|submit|done)\b/i.test(clean(labelOf(control))));
+        if (verify) {
+          await mutate('CLICK', labelOf(verify), () => act.click(page, verify.ref));
+          await delay(3000);
+        }
+        const text = clean((await observe(page)).pageText ?? '').slice(0, 200);
+        say(`EMAIL post-submit: identity code entered${verify ? ` and sent with ${clean(labelOf(verify))}` : ''}: "${text}"`);
+        return;
+      }
       const link = await email.waitForVerificationLink(EMAIL_LABEL, submitAt - 30_000, site,
         wait => say(`EMAIL post-submit: waiting ${wait / 1000}s for an email-verification link`), [30_000, 30_000, 30_000]);
       if (!link) { say('EMAIL post-submit: no email-verification link arrived'); return; }
@@ -945,6 +964,13 @@ async function run() {
       return values.length > 0 && values.every(length => length === 0);
     }
 
+    // Labels name the code ("Verification code") or a one-character OTP box ("Please enter OTP character 1").
+    function emailCodeFields(current) {
+      return current.fields.filter(field => fieldType(field) !== 'password'
+        && (/\b(verification|one.?time|security|confirmation|otp)\b.*\bcode\b|\bcode\b.*\bverif|\botp (character|digit)\b/i.test(`${labelOf(field)} ${field.name ?? ''}`)
+          || (field.maxLength > 0 && field.maxLength <= 10 && (/^(enter |the |your |\d+.digit )*(pass ?code|code)\W*(required)?$/i.test(clean(labelOf(field))) || /^pass ?code$/i.test(field.name ?? '')))));
+    }
+
     // A code sent to an inbox the user connected (multi-gmail) is fetched and typed by the run: the inbox is
     // polled on a fixed schedule and DeepSeek picks the code from the new mail. SMS/authenticator codes stop.
     async function enterEmailedCode(current) {
@@ -958,10 +984,7 @@ async function run() {
       const address = [...shown.matchAll(/[\w.+*-]+@[\w-]+(?:\.[\w-]+)+/g)].map(m => m[0])[0] ?? values.get('facts.email');
       const account = address ? await email.accountFor(address) : null;
       // A code box that still holds text while the page is gated holds a stale or mistyped code: it is replaced.
-      // Labels name the code ("Verification code") or a one-character OTP box ("Please enter OTP character 1").
-      const codeFields = current.fields.filter(field => fieldType(field) !== 'password'
-        && (/\b(verification|one.?time|security|confirmation|otp)\b.*\bcode\b|\bcode\b.*\bverif|\botp (character|digit)\b/i.test(`${labelOf(field)} ${field.name ?? ''}`)
-          || (field.maxLength > 0 && field.maxLength <= 10 && (/^(enter |the |your |\d+.digit )*(pass ?code|code)\W*(required)?$/i.test(clean(labelOf(field))) || /^pass ?code$/i.test(field.name ?? '')))));
+      const codeFields = emailCodeFields(current);
       // The page names the inbox the code went to (an address on screen): that inbox is read.
       // One box takes the whole code; a row of one-character boxes ("code 1" … "code 6") takes one character each.
       if (!account || !codeFields.length || (codeFields.length > 1 && codeFields.length < 4)) stopForGates(current);
@@ -1283,10 +1306,15 @@ async function run() {
     // major). A new mapping is appended, so the first-established (preferred) choices keep priority over later fallbacks.
     async function chooseOption(question, value, listed, preferences = [value]) {
       const options = listed.filter(Boolean);
-      const known = (learned.choices?.[answers.normalize(value)] ?? []).find(choice => options.includes(choice));
+      // A catch-all ("Other", "None of the above") learned on one site is re-judged on another: the site may list a
+      // concrete match, and a catch-all can leave a dependent required field (a "Source" list under "Other") empty.
+      const vague = choice => /^(other|others|none( of (the )?above)?|not listed|n\/?a)\b/i.test(clean(choice));
+      const learnedChoices = (learned.choices?.[answers.normalize(value)] ?? []).filter(choice => options.includes(choice));
+      const known = learnedChoices.find(choice => !vague(choice));
       if (known) { say(`LEARNED choice "${clean(known)}" for ${clean(question)}`); return known; }
       let option = null;
-      try { option = await pickOption(question, value, options, preferences); } catch { return null; }
+      try { option = await pickOption(question, value, options, preferences); } catch { option = null; }
+      if (!option && learnedChoices.length) { say(`LEARNED choice "${clean(learnedChoices[0])}" for ${clean(question)}`); return learnedChoices[0]; }
       if (!option) return null;
       const key = answers.normalize(value);
       learned.choices = { ...learned.choices, [key]: [...(learned.choices?.[key] ?? []).filter(choice => choice !== option), option].slice(-12) };
@@ -1753,6 +1781,15 @@ async function run() {
         if (JSON.stringify(shown.map(option => [option.label, !!option.selected])) === signature && !isEmpty(target)) {
           await act.press(page, 'Tab');
           await pause(400);
+          fresh = await freshSnapshot(current);
+          target = findField(fresh, field);
+          if (!target) return;
+          shown = choicesFor(fresh, target.ref);
+        }
+        // A hierarchical list ("Other" → its sources) may fetch the child list a second or two after the click.
+        for (let wait = 0; wait < 4 && shown.length && isEmpty(target)
+          && JSON.stringify(shown.map(option => [option.label, !!option.selected])) === signature; wait++) {
+          await pause(600);
           fresh = await freshSnapshot(current);
           target = findField(fresh, field);
           if (!target) return;
@@ -2829,6 +2866,29 @@ async function run() {
                 fillProgress.set(progressId, state);
                 await act.press(page, 'Escape').catch(() => undefined);
                 say(`PICK deferred "${labelOf(resolved.field)}": ${error.message.replace(/^needs-user-field "[^"]*": /, '')}`);
+                // A linked list (ZIP under City/State) offers only choices under the values already in its parent
+                // fields: a field the site prefilled from a resume ("Waterville" in City) that contradicts a stored
+                // fact is corrected now, so the deferred pick sees the right list when it is tried again.
+                for (const field of before.fields.filter(other => other.ref !== resolved.field.ref && !isEmpty(other))) {
+                  const key = `facts.${answers.normalize(labelOf(field)).replace(/ /g, '_')}`;
+                  const stored = values.get(key);
+                  const shown = answers.normalize(field.value);
+                  if (typeof stored !== 'string' || !stored || shown.includes(answers.normalize(stored)) || answers.normalize(stored).includes(shown)) continue;
+                  try {
+                    const fresh = await freshSnapshot(current);
+                    const live = findField(fresh, field);
+                    if (!live) continue;
+                    if (isChoiceField(live)) await pickField(fresh, live, key, stored);
+                    else {
+                      await mutate('FILL', labelOf(live), () => act.type(page, live.ref, stored, { secret: true }));
+                      await act.press(page, 'Tab');
+                    }
+                    say(`CORRECTED prefilled "${labelOf(field)}" ("${clean(field.value)}") to the stored ${key}`);
+                  } catch (correction) {
+                    await act.press(page, 'Escape').catch(() => undefined);
+                    history.push(`"${labelOf(field)}" shows "${clean(field.value)}" but the stored answer is "${stored}"; correct it before "${labelOf(resolved.field)}"`);
+                  }
+                }
                 continue;
               }
             } else {
