@@ -1,0 +1,90 @@
+{
+  "browser": {
+    "executable": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "profileDir": "~/.job-app-chrome",
+    "debugHost": "127.0.0.1",
+    "debugPort": 0,
+    "maxTabs": 8
+  },
+  "resumes": {
+    "directory": "~/Documents/resumes",
+    "filePattern": "resume_{lane}.pdf",
+    "fallbackLane": "general",
+    "factsFile": "MASTER-FACTS.md",
+    "latexPreamble": "_preamble.tex"
+  },
+  "discovery": {
+    "handshakeBaseUrl": "https://your-school.joinhandshake.com",
+    "queries": ["software engineer intern"],
+    "includeTitlePattern": "software|developer|data",
+    "excludeTitlePattern": "full[- ]time|senior|manager",
+    "lanes": [
+      { "name": "general", "titlePattern": ".*" }
+    ],
+    "specialLane": {
+      "name": "general",
+      "employerPattern": "(?!)"
+    },
+    "season": {
+      "primaryStartMonths": ["May", "Jun", "Jul"],
+      "shortTermStartMonth": "Jan",
+      "shortTermEndMonths": ["Jan", "Feb"]
+    }
+  },
+  "models": {
+    "driver": {
+      "backend": "openrouter-decisions",
+      "model": "typesafe/jev-1.13",
+      "endpoint": "https://openrouter.ai/api/alpha/decisions",
+      "apiKeyEnv": "OPENROUTER_API_KEY"
+    },
+    "planner": {
+      "backend": "openai-compatible",
+      "model": "deepseek-v4-flash",
+      "endpoint": "https://api.deepseek.com/chat/completions",
+      "apiKeyEnv": "DEEPSEEK_API_KEY"
+    },
+    "fallback": {
+      "backend": "openrouter",
+      "model": "anthropic/claude-haiku-4-5",
+      "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+      "apiKeyEnv": "OPENROUTER_API_KEY"
+    },
+    "writer": {
+      "backend": "openrouter",
+      "model": "anthropic/claude-sonnet-5-5",
+      "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+      "apiKeyEnv": "OPENROUTER_API_KEY"
+    }
+  },
+  "applicant": {
+    "displayName": "Alex Example",
+    "coverLetterHeading": "",
+    "relocateAnywhere": false,
+    "workInPerson": false,
+    "summerAvailability": ""
+  },
+  "email": {
+    "enabled": false,
+    "accountLabel": "",
+    "mcpServer": "~/.local/share/multi-gmail-mcp/gmail-mcp.js",
+    "tokenDatabase": "~/.gmail-mcp-tokens.db",
+    "oauthCredentials": "~/.gmail-mcp-oauth.json"
+  },
+  "credentials": {
+    "backend": "macos-keychain",
+    "servicePrefix": "job-app:"
+  },
+  "notifications": {
+    "backend": "console",
+    "title": "Job harness",
+    "sound": "Glass"
+  },
+  "queue": {
+    "runTimeoutSeconds": 900,
+    "gateWaitSeconds": 300
+  },
+  "runtime": {
+    "debug": false
+  }
+}

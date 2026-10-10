@@ -1,0 +1,35 @@
+{
+  "facts": {
+    "first_name": "Alex",
+    "last_name": "Doe",
+    "preferred_name": "Alex",
+    "legal_first_name": "Alex",
+    "legal_last_name": "Doe",
+    "legal_full_name": "Alex Doe",
+    "legal_initials": "A.D.",
+    "email": "alex.doe@example.com",
+    "phone": "555-0100",
+    "address": "123 Example St",
+    "city": "Exampletown",
+    "state": "EX",
+    "postal_code": "00000",
+    "country": "United States",
+    "linkedin": "https://www.linkedin.com/in/alex-doe",
+    "website": "https://alex-doe.example.com",
+    "github": "https://github.com/alex-doe",
+    "school": "Example University",
+    "degree": "Bachelor of Science",
+    "major": "Computer Science",
+    "graduation": "May 2028",
+    "gpa": "3.80",
+    "work_authorization": "Yes",
+    "sponsorship": "No",
+    "resume": "/absolute/path/to/your/resume.pdf"
+  },
+  "qa": {
+    "why do you want to work here": "I admire the team's work and want to contribute to it.",
+    "how did you hear about this position": "Company website",
+    "are you willing to relocate": "Yes",
+    "what is your desired start date": "June 2027"
+  }
+}

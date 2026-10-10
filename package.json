@@ -1,0 +1,24 @@
+{
+  "name": "job-apply-harness",
+  "private": true,
+  "description": "Browser-driven job-application harness: discover postings, plan and fill forms with model assistance, and report results.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.1.0",
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "setup": "bun setup.mjs",
+    "doctor": "bun setup.mjs --doctor",
+    "apply": "bun apply.mjs",
+    "queue": "bun queue.mjs",
+    "discover": "bun discover.mjs",
+    "report": "bun report.mjs"
+  },
+  "dependencies": {
+    "puppeteer-core": "latest",
+    "tldts": "7.4.16",
+    "ws": "^8.22.0"
+  }
+}
