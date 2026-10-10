@@ -2030,7 +2030,9 @@ async function run() {
         const files = activeFields(current).filter(field => fieldType(field) === 'file');
         // Upload widgets often mark only their question with "*" ("…transcript* Attach"), not the hidden input.
         const required = field => field.required || /\*\s*(\(required\)\s*)?(attach|upload|choose|browse|drop)\b/i.test(field.context ?? '');
-        const missing = files.find(field => required(field) && isEmpty(field) && !['resume', 'cover'].includes(rules.documentKind(field, files.length)));
+        // A slot this run already uploaded to on this screen is filled even when the widget empties its input (Workday).
+        const missing = files.find(field => required(field) && isEmpty(field) && !uploads.has(`${current.url}|${labelOf(field)}`)
+          && !['resume', 'cover'].includes(rules.documentKind(field, files.length)));
         if (missing) throw new Stop(`needs-user-document ${rules.documentKind(missing, files.length)} "${clean(missing.context || labelOf(missing)).slice(0, 80)}"`);
       }
       // A review step whose error list says the resume is missing while every step looked complete (Workday: "Errors
