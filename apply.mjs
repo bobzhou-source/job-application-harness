@@ -385,8 +385,9 @@ function validatePlan(plan, values) {
 // Checkbox ticks and radio picks without a stored answer are Jev's choice, except applicant attestations,
 // consents, and opt-ins: those stay with the user. A radio is picked only while its group has no selection.
 const USER_DECISION = /\b(agree|consent|certif|attest|acknowledg|terms|privacy|policy|signature|sign|authori[sz]|marketing|newsletter|email me|text me|sms)/;
-// Written (model-composed) answers never go into these: they are identity secrets or legal signatures.
-const NEVER_WRITE = /\b(password|passcode|ssn|social security|date of birth|birth ?date|dob|signature|sign here|initials|(verification|security|one time|access|sign in|login|enter( the| your)?) code)\b|^code\b/;
+// Written (model-composed) answers never go into these: they are identity secrets, legal signatures, or an account's
+// login name (the account's own address, entered with the credentials).
+const NEVER_WRITE = /\b(password|passcode|ssn|social security|date of birth|birth ?date|dob|signature|sign here|initials|(verification|security|one time|access|sign in|login|enter( the| your)?) code)\b|^code\b|^(login|log in|login id|login name|user ?name|user id)$/;
 // Marketing/notification opt-ins are never ticked. Applicant attestations (agree, acknowledge, certify) are ticked only
 // under --submit, which authorizes completing the whole application unattended.
 // "Yes, <employer> can contact me about future job opportunities" and talent-pool/retention offers are opt-ins too.
@@ -3036,8 +3037,14 @@ async function run() {
         // one, reused for every field of that form.
         const resetting = resetPasswords.has(identity.host) && (plan.mode === 'register' || all.length >= 2 || !!resetPasswords.get(identity.host));
         if (resetting && !resetPasswords.get(identity.host)) resetPasswords.set(identity.host, await credentials.rotate(identity.host, identity.username));
+        // The longest password the site takes: the box's maxlength, else its stated rule ("8-18 characters",
+        // "no more than 20 characters") in the field messages or page text.
+        const ruleText = [...fields.map(field => field.message ?? ''), ...(fresh.messages ?? []), fresh.pageText ?? ''].join('\n');
+        const stated = ruleText.match(/\b\d{1,2}\s*(?:-|–|to|and)\s*(\d{1,2})\s*(?:characters|chars)\b/i)?.[1]
+          ?? ruleText.match(/\b(?:max(?:imum)?(?: of)?|at most|no more than|up to|not exceed)\s*(\d{1,2})\s*(?:characters|chars)\b/i)?.[1];
+        const maxLength = Math.min(...fields.map(field => field.maxLength > 0 ? field.maxLength : Infinity), Number(stated) >= 8 ? Number(stated) : Infinity);
         const password = resetting ? resetPasswords.get(identity.host)
-          : plan.mode === 'register' ? await credentials.ensure(identity.host, identity.username) : existing;
+          : plan.mode === 'register' ? await credentials.ensure(identity.host, identity.username, Number.isFinite(maxLength) ? maxLength : 0) : existing;
         if (plan.mode === 'register' && existing === null) registering.add(identity.host);
         for (const field of fields) {
           const before = await freshSnapshot(current);
