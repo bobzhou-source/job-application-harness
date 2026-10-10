@@ -1894,6 +1894,11 @@ async function run() {
         }
         const GONE = /you (don['’]t|do not) have permission to view this job|no longer accepting applications|this (job|posting|position|requisition) (is no longer available|is closed|has expired|has been filled)|(registration|applications?) (is |are )?closed for this (job|posting|position)|(the )?requested (job|position|posting) could not be found|(job|position|posting) (could not be|was not) found|the page you are looking for (doesn['’]t|does not) exist/i;
         if (GONE.test(text)) throw new Stop(`posting-unavailable (page shows "${clean(text.match(GONE)[0])}")`);
+        // A site-wide outage (maintenance notice, service unavailable) with no form: the queue retries it later.
+        const DOWN = /(down for|scheduled|undergoing|under|currently in) maintenance|maintenance (is )?in progress|service (interruption|(is )?(temporarily )?unavailable)|(site|service|system) is (currently |temporarily )?unavailable/i;
+        if (!activeFields(current).length && (DOWN.test(text) || /maintenance/i.test(new URL(current.url).pathname))) {
+          throw new Stop(`site-down (page shows "${clean(text.match(DOWN)?.[0] ?? 'a maintenance page')}")`);
+        }
         // Two listings (an employer's own and a partner's re-post) can lead to one employer requisition. The first
         // employer page whose path carries an id is this run's employer posting; one already submitted from another
         // listing ends the run instead of sending a duplicate application.

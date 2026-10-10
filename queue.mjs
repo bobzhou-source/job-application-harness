@@ -3,7 +3,8 @@
 // --discover refills queue.tsv from Handshake (discover.mjs) whenever it runs dry, so the run keeps finding new jobs.
 // Per posting: a run that stops for a transient reason (model budget, planner/driver error) is retried once; a
 // CAPTCHA or MFA gate posts a notification, waits the configured gate time (queue.gateWaitSeconds), and retries
-// once; any other stop (a field or document only the user has, closed posting) moves on. Rows leave queue.tsv once
+// once; a site outage (site-down) moves the posting to the queue's end, at most twice; any other stop (a field or
+// document only the user has, closed posting) moves on. Rows leave queue.tsv once
 // handled; results append to runs/queue-results.txt and each run's console output to runs/queue-logs/<name>.log.
 import { appendFileSync, mkdirSync, createWriteStream, existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -79,6 +80,9 @@ function discover() {
 }
 
 let handled = 0;
+// Site-down deferrals per posting this queue run, and the posting the current pass moves to the queue's end.
+const sitedown = new Map();
+let deferred = null;
 while (handled < limit) {
   let queue = readQueue();
   if (!queue.length && refill) { await discover(); queue = readQueue(); }
@@ -86,6 +90,7 @@ while (handled < limit) {
   if (!row) break;
   const logName = row.name.replace(/[^\w]+/g, '_').slice(0, 60);
   const history = jobHistory().get(jobKey(row.url));
+  deferred = null;
   if (history?.done) {
     record(`=== ${row.name} (${row.lane}) ${row.url}\nSKIPPED (already ${history.submitted ? 'submitted' : 'closed or applied'})`);
   } else {
@@ -102,11 +107,18 @@ while (handled < limit) {
       if (GATE.test(reason)) {
         notify(`${row.name}: ${reason.slice(0, 80)} — solve it in the automation Chrome within ${Math.round(GATE_WAIT_MS / 60_000)} min`);
         await new Promise(r => setTimeout(r, GATE_WAIT_MS));
-      } else if (!(TRANSIENT.test(reason) || !run)) break;
+      } else if (!(TRANSIENT.test(reason) || !run)) {
+        // An outage outlasts an immediate retry: try again after the rest of the queue (at most twice per posting).
+        if (/^site-down/.test(reason) && sitedown.get(jobKey(row.url)) !== 2) {
+          sitedown.set(jobKey(row.url), (sitedown.get(jobKey(row.url)) ?? 0) + 1);
+          deferred = row;
+        }
+        break;
+      }
       retried = true;
     }
   }
-  writeQueue(readQueue().filter(other => jobKey(other.url) !== jobKey(row.url)));
+  writeQueue([...readQueue().filter(other => jobKey(other.url) !== jobKey(row.url)), ...(deferred ? [deferred] : [])]);
   handled += 1;
 }
 record('QUEUE_DONE');

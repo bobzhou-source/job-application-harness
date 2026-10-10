@@ -109,6 +109,7 @@ function category(row) {
   const table = [
     [/captcha-rejected/i, 'captcha-rejected', 'user: apply in normal browser'],
     [/already (applied|submitted)|application (is already|was) submitted/i, 'already-applied', ''],
+    [/^site-down|maintenance/i, 'site-down', 'rerun later'],
     [/posting-unavailable|no longer (available|accepting)|registration is closed|posting (is )?closed|no (job )?openings|could not be found|page you are looking for|no .*matching the target role|no link matching|all n(ot|on)[- ]matching|contain no /i, 'posting-gone', ''],
     [/captcha|robot|human verification/i, 'captcha', 'user: solve captcha, rerun'],
     [/date of birth|\bdob\b|birth ?date/i, 'needs-dob', 'user: DOB'],
