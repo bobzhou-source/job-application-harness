@@ -4,6 +4,7 @@ import { resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { getDomain } from 'tldts';
 
 const USAGE = 'usage: bun apply.mjs <https-job-url> [--resume <path>] [--answer "Question=Answer"]... [--submit]';
 // `--help` prints usage and exits before configuration, answers, Chrome, or any harness module below is loaded, so a
@@ -1854,17 +1855,20 @@ async function run() {
         const code = (await page.evaluate(() => document.body?.innerText ?? '').catch(() => '')).match(/\bERR_[A-Z_]+\b/)?.[0] ?? 'unknown error';
         if (errorReloads++ >= 1) throw new Stop(`external-site-failed-to-load (Chrome showed its error page twice: ${code})`);
         const cdp = await page.createCDPSession().catch(() => null);
-        const failed = (await cdp?.send('Page.getNavigationHistory').catch(() => null))?.entries?.at(-1)?.url;
+        const entry = (await cdp?.send('Page.getNavigationHistory').catch(() => null))?.entries?.at(-1);
+        const failed = [entry?.url, entry?.userTypedURL].find(url => /^https?:/.test(url ?? ''));
         let cleared = 0;
-        if (cdp && /^https?:/.test(failed ?? '') && code === 'ERR_TOO_MANY_REDIRECTS') {
-          const { cookies = [] } = await cdp.send('Network.getCookies', { urls: [failed] }).catch(() => ({}));
-          for (const cookie of cookies) {
+        if (cdp && failed && code === 'ERR_TOO_MANY_REDIRECTS') {
+          // A loop often bounces between sibling hosts (careers.x.com ↔ x.com): every cookie of the registrable domain.
+          const domain = getDomain(new URL(failed).hostname, { allowPrivateDomains: true }) ?? new URL(failed).hostname;
+          const { cookies = [] } = await cdp.send('Network.getAllCookies').catch(() => ({}));
+          for (const cookie of cookies.filter(cookie => `.${cookie.domain.replace(/^\./, '')}`.endsWith(`.${domain}`))) {
             await cdp.send('Network.deleteCookies', { name: cookie.name, domain: cookie.domain, path: cookie.path }).catch(() => undefined);
             cleared += 1;
           }
         }
         await cdp?.detach().catch(() => undefined);
-        say(`PAGE failed to load (${code}${cleared ? `; cleared ${cleared} cookies of ${new URL(failed).host}` : ''}); reloading once`);
+        say(`PAGE ${failed ? new URL(failed).host : 'page'} failed to load (${code}${cleared ? `; cleared ${cleared} cookies of its domain` : ''}); reloading once`);
         await delay(3000);
         if (/^https?:/.test(failed ?? '')) await page.goto(failed, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => undefined);
         else await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => undefined);
