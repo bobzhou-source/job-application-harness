@@ -1848,12 +1848,26 @@ async function run() {
         say(`TAB ${clean(new URL(page.url()).host)}`);
       }
       // A page Chrome could not load (DNS, redirect loop, refused: chrome-error://chromewebdata) is retried once; one
-      // that still fails ends the run instead of letting a model click the error page's help links.
+      // that still fails ends the run instead of letting a model click the error page's help links. A redirect loop
+      // is usually a stale cookie: the failed URL's cookies are cleared before the retry (Chrome's own remedy).
       if (/^chrome-error:/.test(page.url())) {
-        if (errorReloads++ >= 1) throw new Stop('external-site-failed-to-load (Chrome showed its error page twice)');
-        say('PAGE failed to load (Chrome error page); reloading once');
+        const code = (await page.evaluate(() => document.body?.innerText ?? '').catch(() => '')).match(/\bERR_[A-Z_]+\b/)?.[0] ?? 'unknown error';
+        if (errorReloads++ >= 1) throw new Stop(`external-site-failed-to-load (Chrome showed its error page twice: ${code})`);
+        const cdp = await page.createCDPSession().catch(() => null);
+        const failed = (await cdp?.send('Page.getNavigationHistory').catch(() => null))?.entries?.at(-1)?.url;
+        let cleared = 0;
+        if (cdp && /^https?:/.test(failed ?? '') && code === 'ERR_TOO_MANY_REDIRECTS') {
+          const { cookies = [] } = await cdp.send('Network.getCookies', { urls: [failed] }).catch(() => ({}));
+          for (const cookie of cookies) {
+            await cdp.send('Network.deleteCookies', { name: cookie.name, domain: cookie.domain, path: cookie.path }).catch(() => undefined);
+            cleared += 1;
+          }
+        }
+        await cdp?.detach().catch(() => undefined);
+        say(`PAGE failed to load (${code}${cleared ? `; cleared ${cleared} cookies of ${new URL(failed).host}` : ''}); reloading once`);
         await delay(3000);
-        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => undefined);
+        if (/^https?:/.test(failed ?? '')) await page.goto(failed, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => undefined);
+        else await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => undefined);
         continue;
       }
       watchDialogs(page);
