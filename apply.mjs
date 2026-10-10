@@ -226,7 +226,7 @@ function activeFormRefs(current) {
 // (or the lone field, when formless or inside an application form) is excluded.
 const SUBSCRIBE = /\b(subscribe|subscription|newsletter|mailing list|latest news|job alerts?|talent (community|network)|e-?mail updates|sign up for (our )?(e-?mails?|updates|news|insights)|stay (informed|connected|up to date|in touch))\b/i;
 // A native select's placeholder row ("Select", "-- Choose --"), never an answer.
-const PLACEHOLDER_OPTION = /^\s*(|select|select one|choose|choose one|please select|please choose|-+.*-+|none selected)\s*\.{0,3}$/i;
+const PLACEHOLDER_OPTION = /^\s*(|select|select one|choose|choose one|please select|please choose|please specify|[-–—]+.*[-–—]+|none selected)\s*\.{0,3}$/i;
 function activeFields(current) {
   // A newsletter/talent-community form is skipped whole; an opt-in checkbox inside an application form (3+ other
   // fields) is skipped alone, never the application around it. A field inside a signup block (snapshot `signup`:
@@ -270,7 +270,10 @@ function activeFields(current) {
       if (size >= 3 && fields.some(field => field.formRef === ref && field.required)) refs.add(ref);
     }
   }
-  return refs.size ? fields.filter(field => refs.has(field.formRef) || (!field.formRef && field.required)) : fields;
+  // An active form holding no fields at all (its inputs render outside the <form>: ADP's sign-in Email box beside a
+  // form wrapping only Continue) owns the screen's formless fields.
+  const fieldless = refs.size && !fields.some(field => refs.has(field.formRef));
+  return refs.size ? fields.filter(field => refs.has(field.formRef) || (!field.formRef && (field.required || fieldless))) : fields;
 }
 // A control inside a newsletter/email-updates block (its "Submit"/"Sign up") subscribes the applicant; one owned by
 // an application form (3+ active fields) is that form's own, even beside a "Sign up for job alerts" box.
@@ -970,7 +973,8 @@ async function run() {
     function emailCodeFields(current) {
       return current.fields.filter(field => fieldType(field) !== 'password'
         && (/\b(verification|one.?time|security|confirmation|otp)\b.*\bcode\b|\bcode\b.*\bverif|\botp (character|digit)\b/i.test(`${labelOf(field)} ${field.name ?? ''}`)
-          || (field.maxLength > 0 && field.maxLength <= 10 && (/^(enter |the |your |\d+.digit )*(pass ?code|code)\W*(required)?$/i.test(clean(labelOf(field))) || /^pass ?code$/i.test(field.name ?? '')))));
+          || /^(enter |the |your |\d+.digit )*pass ?code\W*(required)?$/i.test(clean(labelOf(field))) || /^pass ?code$/i.test(field.name ?? '')
+          || (field.maxLength > 0 && field.maxLength <= 10 && /^(enter |the |your |\d+.digit )*code\W*(required)?$/i.test(clean(labelOf(field))))));
     }
 
     // A code sent to an inbox the user connected (multi-gmail) is fetched and typed by the run: the inbox is
@@ -1275,7 +1279,10 @@ async function run() {
     // Only consulted after this run clicked a final submit (submittedVia), so post-submit phrasing ("You're all set")
     // counts too.
     // "succesfully"/"sucessfully" misspellings and "has successfully been submitted" word order are site wording too.
-    const SUBMITTED_TEXT = /thank(s| you) for (your )?(application|applying|submitting|submission|your interest|(your )?registration|registering)|application (has |have )?(been |was |is )?(succ?ess?fully )?(been )?(submitted|received|complete|sent)|(we('ve| have)|has been) received your application|\bapplied on\b|you('ve| have)? (succ?ess?fully )?applied|submission (is )?(complete|received|successful)|succ?ess?fully submitted|you('| a)re all set\b/i;
+    // "Applied on" counts only with its date ("Applied on October 10, 2026"): a status table's "Applied On" column
+    // header names no application.
+    const APPLIED_ON = /\bapplied on:?\s+(\d|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d)/i.source;
+    const SUBMITTED_TEXT = new RegExp(`thank(s| you) for (your )?(application|applying|submitting|submission|your interest|(your )?registration|registering)|application (has |have )?(been |was |is )?(succ?ess?fully )?(been )?(submitted|received|complete|sent)|(we('ve| have)|has been) received your application|${APPLIED_ON}|you('ve| have)? (succ?ess?fully )?applied|submission (is )?(complete|received|successful)|succ?ess?fully submitted|you('| a)re all set\\b`, 'i');
     // Some sites confirm only by where they land after the submit (Workday: /jobTasks/completed/application).
     const SUBMITTED_URL = /\/(completed\/application|application-?(submitted|complete|confirmation)|thank-?you|confirmation)\b/i;
     const isConfirmed = current => (SUBMITTED_TEXT.test(String(current.pageText ?? '')) || SUBMITTED_URL.test(new URL(current.url).pathname))
@@ -1284,7 +1291,7 @@ async function run() {
     confirmSubmitted = async () => isConfirmed(await observe(page));
     // A standing confirmation found without this run's submit must name a received application: account sign-up
     // pages say "Thank you for registering" too, and a talent-community "thank you for your interest" is no application.
-    const APPLIED_TEXT = /application (has |have )?(been |was |is )?(succ?ess?fully )?(been )?(submitted|received|sent)|(we('ve| have)|has been) received your application|thank(s| you) for (your )?(application|applying)|you('ve| have)? (succ?ess?fully )?applied\b|\bapplied on\b/i;
+    const APPLIED_TEXT = new RegExp(`application (has |have )?(been |was |is )?(succ?ess?fully )?(been )?(submitted|received|sent)|(we('ve| have)|has been) received your application|thank(s| you) for (your )?(application|applying)|you('ve| have)? (succ?ess?fully )?applied\\b|${APPLIED_ON}`, 'i');
     let lastMark = null;
     let stalls = 0;
     let lookedAgain = null;
@@ -2001,7 +2008,8 @@ async function run() {
       // nothing to do: it reports the standing confirmation, not a stop.
       if (!submittedVia && new URL(current.url).host !== posting.host && !activeFields(current).length && isConfirmed(current)
         && APPLIED_TEXT.test(String(current.pageText ?? ''))) {
-        say('SUBMITTED earlier (confirmed: the employer page already states the application was received)');
+        const evidence = String(current.pageText ?? '').match(APPLIED_TEXT)?.[0] ?? '';
+        say(`SUBMITTED earlier (confirmed: the employer page already states the application was received: "${clean(evidence).slice(0, 80)}")`);
         submitted = true;
         return;
       }
