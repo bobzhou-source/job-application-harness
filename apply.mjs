@@ -1824,6 +1824,8 @@ async function run() {
     let redrives = 0;
     // Times the run landed on a social/review site (a badge or share link) and went back; a few at most.
     let offsite = 0;
+    // Reloads of a Chrome error page (the page failed to load).
+    let errorReloads = 0;
     for (let iteration = 0; iteration < 300; iteration++) { try {
       phase = 'snapshot';
       const previousPage = page;
@@ -1832,6 +1834,15 @@ async function run() {
         page = newTab;
         history.push(`a new tab opened (${new URL(page.url()).host}); continuing there`);
         say(`TAB ${clean(new URL(page.url()).host)}`);
+      }
+      // A page Chrome could not load (DNS, redirect loop, refused: chrome-error://chromewebdata) is retried once; one
+      // that still fails ends the run instead of letting a model click the error page's help links.
+      if (/^chrome-error:/.test(page.url())) {
+        if (errorReloads++ >= 1) throw new Stop('external-site-failed-to-load (Chrome showed its error page twice)');
+        say('PAGE failed to load (Chrome error page); reloading once');
+        await delay(3000);
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => undefined);
+        continue;
       }
       watchDialogs(page);
       if (/^https?:/.test(page.url()) && offApplication(new URL(page.url()))) {
