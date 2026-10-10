@@ -1203,6 +1203,8 @@ async function run() {
     const essayKeys = new Set();
     // Hosts whose password was generated this run for an account still being created (cleared by a later login).
     const registering = new Set();
+    // URLs whose nearly empty screen already got one long wait before a planner stop.
+    const blankWaits = new Set();
 
     // DeepSeek is consulted only when Jev stays stuck. Its answer is concrete actions on the current screen
     // (queued and run through the same executor checks), or a revised goal list, or a stop.
@@ -1214,6 +1216,14 @@ async function run() {
       runlog.trace('planner', { escalation, goals, result });
       if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Stop('planner-error', 1);
       if (typeof result.stop === 'string' && result.stop.trim()) {
+        // A screen with no fields and almost no controls right after a step (a verify page between states, a
+        // spinner) is usually still loading: it gets one longer wait per URL before a stop is believed.
+        if (!activeFields(current).length && current.controls.length <= 4 && !blankWaits.has(current.url)) {
+          blankWaits.add(current.url);
+          say(`WAIT the screen is nearly empty (${current.controls.length} controls); giving it 12s before stopping`);
+          await delay(12000);
+          return;
+        }
         throw new Stop([clean(result.stop), ...(Array.isArray(result.questions) ? result.questions : []).map(clean)].filter(Boolean).join(' '));
       }
       if (Array.isArray(result.actions)) {
