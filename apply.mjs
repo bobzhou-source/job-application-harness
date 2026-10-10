@@ -25,7 +25,7 @@ const rules = await import('./lib/rules.mjs');
 const { planGoals, expandAliases, rewriteValue, pickCode, pickPreference, writeAnswers } = await import('./lib/planner.mjs');
 const email = await import('./lib/email.mjs');
 const { drive, pickOption, plan: jevPlan } = await import('./lib/jev.mjs');
-const { coverLetter, instructedDocument } = await import('./lib/coverletter.mjs');
+const { coverLetter, instructedDocument, tailoredResume } = await import('./lib/coverletter.mjs');
 const answers = await import('./lib/answers.mjs');
 const credentials = await import('./lib/credentials.mjs');
 const runlog = await import('./lib/trace.mjs');
@@ -1163,6 +1163,15 @@ async function run() {
     let targetNote = '';
     // The first screen's text (the posting itself): the cover-letter writer's description of the role.
     let postingText = '';
+    // The resume rewritten for this posting, started as soon as the posting text is read so the writer works while the
+    // form is filled; null when it could not be built (the lane resume is uploaded instead).
+    let tailoredPending = null;
+    const tailorResume = pageText => tailoredResume({ url: runUrl, title: runInfo.title ?? '', pageText, basePdf: resume })
+      .catch(error => {
+        runlog.trace('tailored-resume-error', { message: clean(error?.message).slice(0, 200) });
+        say(`RESUME not tailored (${clean(error?.message).slice(0, 120)}); using ${basename(resume)}`);
+        return null;
+      });
     // Resume uploads per page URL and file-field label (see the upload_resume check).
     const uploads = new Map();
     // Registry keys of essays the writer composed this run: they name this employer and posting, so they are never
@@ -1824,6 +1833,17 @@ async function run() {
         }
         const GONE = /you (don['’]t|do not) have permission to view this job|no longer accepting applications|this (job|posting|position|requisition) (is no longer available|is closed|has expired|has been filled)|(registration|applications?) (is |are )?closed for this (job|posting|position)|(the )?requested (job|position|posting) could not be found|(job|position|posting) (could not be|was not) found|the page you are looking for (doesn['’]t|does not) exist/i;
         if (GONE.test(text)) throw new Stop(`posting-unavailable (page shows "${clean(text.match(GONE)[0])}")`);
+        // Two listings (an employer's own and a partner's re-post) can lead to one employer requisition. The first
+        // employer page whose path carries an id is this run's employer posting; one already submitted from another
+        // listing ends the run instead of sending a duplicate application.
+        const here = new URL(current.url);
+        if (!submittedVia && !runInfo.employerPosting && here.host !== posting.host && /\d{4,}/.test(here.pathname)) {
+          runInfo.employerPosting = `${here.host}${here.pathname.replace(/\/+$/, '')}`;
+          const rows = await readFile(new URL('./runs/summary.jsonl', import.meta.url), 'utf8').catch(() => '');
+          const prior = rows.split('\n').map(line => { try { return JSON.parse(line); } catch { return null; } })
+            .find(row => row?.outcome === 'submitted' && row.employerPosting === runInfo.employerPosting && row.job !== url.replace(/[?#].*$/, ''));
+          if (prior) throw new Stop(`already applied (the same employer posting was submitted from ${prior.job})`);
+        }
       }
       // A sign-in taken over the application form (an emailed-code modal on a page of applicant fields) that lands on
       // another path (a "Welcome"/profile page) left the application unsent: go back to it (twice at most: a driver
@@ -1879,6 +1899,7 @@ async function run() {
           targetRole = clean(title.split(/\s+\|\s+/)[0]);
           runInfo.title = clean(title).slice(0, 160);
           if (onPosting) postingText = String(current.pageText ?? '').slice(0, 4000);
+          if (postingText && resumeAvailable) tailoredPending = tailorResume(postingText);
           targetNote = ` The target posting is "${title.slice(0, 160)}": on any page that lists several roles, open only the role matching it (same title); if none matches, stop rather than apply to a different role.`;
           BASE_GOAL.guidance += targetNote;
           for (const goal of goals) goal.guidance += targetNote;
@@ -2851,6 +2872,16 @@ async function run() {
         const { field, kind } = documentField(current, plan.ref, resumeAvailable);
         let file = resume;
         if (kind === 'resume' && !await resumeIsReadable(resume)) throw new Stop('resume-not-readable', 1);
+        if (kind === 'resume') {
+          phase = 'tailored-resume';
+          const tailored = await (tailoredPending ??= tailorResume(`${postingText}\n${String(current.pageText ?? '')}`.slice(0, 6000)));
+          phase = 'driver';
+          if (tailored) {
+            file = tailored;
+            runInfo.tailored = true;
+            say(`RESUME tailored for this posting: ${tailored}`);
+          }
+        }
         if (kind === 'cover') {
           // A tailored letter for this posting, written and compiled once per job (cached across re-runs).
           phase = 'cover-letter';

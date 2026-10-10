@@ -253,6 +253,8 @@ The complete schema is:
 
 For a lane named `general`, the example pattern resolves to `resume_general.pdf`. Queue construction and report validation use this same pattern.
 
+When a lane variant has a LaTeX source beside it (`resume_general.tex` next to `resume_general.pdf`) and document generation is available, each run asks the writer to tailor that variant to the posting: reorder and reword bullets toward what the posting asks for, using only the variant, the other variants, and the facts file. The result must keep the letterhead line, the Education section, every role heading, date, and number from the sources, and compile to one page; otherwise the run uploads the untailored variant. Tailored PDFs keep the variant's file name and are cached per posting under `resumes.directory/tailored/<hash>/`, so you can review exactly what was sent.
+
 ### Discovery
 
 - `handshakeBaseUrl`: HTTPS origin with no credentials, query, or fragment.

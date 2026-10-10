@@ -159,10 +159,10 @@ function applications(runs) {
       name: info.name ?? final.title ?? '', status, who, attempts: list.length,
       secs: Math.round(list.reduce((s, run) => s + (run.secs ?? 0), 0)), cost: list.reduce((s, run) => s + (run.cost ?? 0), 0),
       consults: list.reduce((s, run) => s + (run.models?.deepseek?.calls ?? 0), 0), site: final.site ?? '',
-      resume: resumeSent, resumeOk, documents: sent.join(' ; '), reason: final.outcome === 'submitted' ? '' : String(final.reason ?? '').slice(0, 160),
+      resume: resumeSent, resumeOk, tailored: final.tailored ? 'yes' : '', documents: sent.join(' ; '), reason: final.outcome === 'submitted' ? '' : String(final.reason ?? '').slice(0, 160),
     };
   });
-  const columns = ['last', 'job', 'lane', 'name', 'status', 'who', 'attempts', 'secs', 'cost', 'consults', 'site', 'resume', 'resumeOk', 'documents', 'reason'];
+  const columns = ['last', 'job', 'lane', 'name', 'status', 'who', 'attempts', 'secs', 'cost', 'consults', 'site', 'resume', 'resumeOk', 'tailored', 'documents', 'reason'];
   const cell = value => { const text = typeof value === 'number' ? String(Math.round(value * 1e4) / 1e4) : String(value ?? ''); return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text; };
   const csv = [columns.join(','), ...apps.map(app => columns.map(column => cell(app[column])).join(','))].join('\n');
   const out = fileURLToPath(new URL('./runs/applications.csv', import.meta.url));
