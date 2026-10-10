@@ -1770,7 +1770,9 @@ async function run() {
         preferred = null;
         const option = shown.find(candidate => candidate.label === label);
         if (!option) needsField(field, `no owned option matches the stored answer or its aliases (shown: ${shown.slice(0, 6).map(candidate => `"${clean(candidate.label).slice(0, 40)}"`).join(', ')})`);
-        if (option.selected) return;
+        // An empty field's "selected" option is only the keyboard highlight (Workday marks the first entry of a
+        // freshly opened child list aria-selected): it still needs the click.
+        if (option.selected && !isEmpty(target)) return;
         // A multi-select's chips (its value before this pick lists them) already hold this choice: clicking it again
         // in a list that keeps chosen options toggles it off. (After a typed search the live value is the search text.)
         if (depth === 0 && String(field.value ?? '').split(/\s*,\s*/).some(chip => answers.normalize(chip) === answers.normalize(option.label))) return;
