@@ -3041,7 +3041,7 @@ async function run() {
         // "no more than 20 characters") in the field messages or page text.
         const ruleText = [...fields.map(field => field.message ?? ''), ...(fresh.messages ?? []), fresh.pageText ?? ''].join('\n');
         const stated = ruleText.match(/\b\d{1,2}\s*(?:-|–|to|and)\s*(\d{1,2})\s*(?:characters|chars)\b/i)?.[1]
-          ?? ruleText.match(/\b(?:max(?:imum)?(?: of)?|at most|no more than|up to|not exceed)\s*(\d{1,2})\s*(?:characters|chars)\b/i)?.[1];
+          ?? ruleText.match(/\b(?:max(?:imum)?(?: of)?|at most|no more than|up to|not exceed|(?:not be|no) longer than)\s*(\d{1,2})\s*(?:characters|chars)\b/i)?.[1];
         const maxLength = Math.min(...fields.map(field => field.maxLength > 0 ? field.maxLength : Infinity), Number(stated) >= 8 ? Number(stated) : Infinity);
         const password = resetting ? resetPasswords.get(identity.host)
           : plan.mode === 'register' ? await credentials.ensure(identity.host, identity.username, Number.isFinite(maxLength) ? maxLength : 0) : existing;
