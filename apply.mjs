@@ -276,9 +276,12 @@ function activeFields(current) {
   return refs.size ? fields.filter(field => refs.has(field.formRef) || (!field.formRef && (field.required || fieldless))) : fields;
 }
 // A control inside a newsletter/email-updates block (its "Submit"/"Sign up") subscribes the applicant; one owned by
-// an application form (3+ active fields) is that form's own, even beside a "Sign up for job alerts" box.
+// an application form (3+ active fields) is that form's own, even beside a "Sign up for job alerts" box. So is one in
+// a block whose own choice already declines ("Join our Talent Network: No thanks, continue to apply" → Continue).
 function signupControl(current, control) {
-  return Boolean(control.signup)
+  const declined = control.formRef && current.fields.some(field => field.formRef === control.formRef
+    && ['radio', 'select'].includes(fieldType(field)) && /^(no\b|decline|not (now|interested)|skip)|continue to apply/i.test(clean(field.value)));
+  return Boolean(control.signup) && !declined
     && !(control.formRef && activeFields(current).filter(field => field.formRef === control.formRef).length >= 3);
 }
 
@@ -720,9 +723,11 @@ async function mutate(operation, label, action) {
       throw new Stop(`unknown-required-field ${clean(label)}`);
     }
     // Known outcomes, so the run observes again instead of stopping: the target vanished before anything was sent,
-    // or a dropdown was verified to hold no choice after the pick.
+    // a dropdown was verified to hold no choice after the pick, or a box would not keep the typed text (a date
+    // picker rejecting the format): the next observation shows it empty.
     if (/no longer resolves/.test(message)) invalidPlan(`stale-ref ${clean(label).slice(0, 60)}`);
     if (/the dropdown kept no choice/.test(message)) invalidPlan(`stale-choice ${clean(label).slice(0, 60)}`);
+    if (/: value did not stick$/.test(message)) invalidPlan(`unheld-value ${clean(label).slice(0, 60)}`);
     // Do not expose the original error: libraries can include typed values or paths.
     throw new Stop(`action-outcome-unknown ${operation} ${clean(label)}`, 1);
   }
