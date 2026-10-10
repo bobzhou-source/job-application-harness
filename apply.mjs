@@ -1714,7 +1714,7 @@ async function run() {
             shown = choicesFor(fresh, target.ref);
             const unchanged = shown.length && JSON.stringify(shown.map(option => option.label)) === unfiltered;
             if (shown.length && (!unchanged || entered)) break;
-            if (wait >= 1 && !entered) { await act.press(page, 'Enter'); entered = true; }
+            if (wait >= 1 && !entered) { await act.searchEnter(page, target.ref); entered = true; }
           }
           if (exact(shown.map(option => option.label))) break;
           // A list the search actually narrowed (aliases run in preference order) is offered to the choice step right
