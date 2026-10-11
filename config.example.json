@@ -34,7 +34,7 @@
     "listings": {
       "url": "https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/.github/scripts/listings.json",
       "terms": ["Summer 2027"],
-      "locationPattern": ",\\s*[A-Z]{2}$|\\bUSA\\b|remote$"
+      "locationPattern": ",\\s*(AL|AK|AZ|AR|CA|CO|CT|DE|DC|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|PR)$|\\b(USA|United States)\\b|^Remote( in US| - US)?$"
     }
   },
   "models": {
