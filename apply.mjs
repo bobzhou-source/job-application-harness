@@ -56,6 +56,8 @@ function notify(message) {
   }
   execFile('osascript', ['-e', `display notification ${JSON.stringify(message)} with title ${JSON.stringify(title)} sound name ${JSON.stringify(sound)}`], () => {});
 }
+// Stops only the user can finish in the page itself (a captcha, an MFA prompt): the run's tab stays open for them.
+const USER_GATE = /^(captcha-rejected|gate (captcha|captcha-challenge|mfa)\b)/i;
 
 // The connected Gmail label (config.email.accountLabel) and whether inbox automation is available at all. With email
 // disabled, the run stops cleanly where it would need the inbox and the user completes emailed verification by hand.
@@ -766,13 +768,15 @@ async function learnAlias(key, original, accepted) {
 // learned.json — what past runs found to work, replayed without any model call:
 //   fields:  normalized field label/name → answer key the site accepted for it (the executor fills these first);
 //   choices: normalized stored answer → dropdown choice texts it was mapped to (no model call next time);
-//   lessons: one-line notes from DeepSeek consults that got a stuck screen moving, per host (Jev reads them).
+//   lessons: one-line notes from DeepSeek consults that got a stuck screen moving, per host (Jev reads them);
+//   noAnswer: optional field labels Jev judged no stored answer fits ("Employee ID (if applicable)", "Phone
+//             Extension"): left empty, they no longer hold back the deterministic Next/Submit rule.
 const learnedPath = fileURLToPath(new URL('./learned.json', import.meta.url));
 async function loadLearned() {
   try {
     const data = JSON.parse(await readFile(learnedPath, 'utf8'));
-    return { fields: data.fields ?? {}, choices: data.choices ?? {}, lessons: data.lessons ?? [] };
-  } catch { return { fields: {}, choices: {}, lessons: [] }; }
+    return { fields: data.fields ?? {}, choices: data.choices ?? {}, lessons: data.lessons ?? [], noAnswer: data.noAnswer ?? [] };
+  } catch { return { fields: {}, choices: {}, lessons: [], noAnswer: [] }; }
 }
 async function saveLearned(learned) {
   await writeFile(learnedPath, `${JSON.stringify(learned, null, 2)}\n`);
@@ -792,6 +796,8 @@ async function run() {
   let connection;
   // Closes the tabs this run opened, keeping the one it ended on (set once the tab watcher exists).
   let closeRunTabs = null;
+  // Why the run stopped (null when it submitted); a stop the user must finish keeps its tab held for them.
+  let stopReason = null;
   let phase = 'arguments';
   // Label of the final-submit control clicked; the run ends once a later screen confirms the submission. A stop
   // after that click re-checks the page, so a model error on the confirmation screen does not hide a submission.
@@ -832,10 +838,15 @@ async function run() {
     // Tabs opened after this point (e.g. an "Apply externally" link) become the working tab on the next pass.
     const tabs = browser.watchTabs(connection);
     // A submitted application is finished: every tab it used closes, the posting tab included, so tabs do not pile
-    // up and slow Chrome. A stopped run keeps the page it ended on for the next attempt.
+    // up and slow Chrome. A stopped run keeps the page it ended on for the next attempt; a captcha or MFA step is
+    // held open for the user to finish whenever they can.
     closeRunTabs = async () => {
       await tabs.closeOthers(submitted ? null : page);
       if (submitted && !page.isClosed()) await page.close().catch(() => undefined);
+      if (!submitted && USER_GATE.test(stopReason ?? '')) {
+        browser.holdTab(page, url, stopReason);
+        notify(`Left open for you: ${clean(stopReason).slice(0, 60)} on ${new URL(page.url()).host}`);
+      }
     };
     // Some employers confirm the applicant's email only after submit ("[Action Required] verify your email to move to
     // the next step"). After a confirmed submit on an employer site, the inbox is checked for ~90 s for that site's
@@ -864,8 +875,12 @@ async function run() {
         say(`EMAIL post-submit: identity code entered${verify ? ` and sent with ${clean(labelOf(verify))}` : ''}: "${text}"`);
         return;
       }
+      // The full ~90 s window only when the confirmation page itself asks for an email step; otherwise one look after
+      // 30 s (that wait found a link on 2 of ~270 submits, and cost every other submit 90 s).
+      const asks = /\b(verify|confirm|activate)\b.{0,40}\b(e-?mail|account)\b|\bcheck your (e-?mail|inbox)\b|\bverification (e-?mail|link)\b/i
+        .test(clean(after?.pageText ?? ''));
       const link = await email.waitForVerificationLink(EMAIL_LABEL, submitAt - 30_000, site,
-        wait => say(`EMAIL post-submit: waiting ${wait / 1000}s for an email-verification link`), [30_000, 30_000, 30_000]);
+        wait => say(`EMAIL post-submit: waiting ${wait / 1000}s for an email-verification link`), asks ? [30_000, 30_000, 30_000] : [30_000]);
       if (!link) { say('EMAIL post-submit: no email-verification link arrived'); return; }
       const scratch = await page.browser().newPage();
       try {
@@ -941,9 +956,10 @@ async function run() {
     const CAPTCHA_GATES = new Set(['captcha', 'captcha-challenge']);
     async function awaitCaptcha(current) {
       if (!current.gates.length || !current.gates.every(gate => CAPTCHA_GATES.has(gate))) return false;
-      say(`GATE ${current.gates.join(' ')}: waiting up to 5 min for the user to solve it`);
+      // A short wait for a user at the keyboard; otherwise the run stops and its tab stays open for them.
+      say(`GATE ${current.gates.join(' ')}: waiting up to 60 s for the user to solve it`);
       notify(`Solve the captcha on ${new URL(current.url).host}`);
-      for (const end = Date.now() + 300_000; Date.now() < end;) {
+      for (const end = Date.now() + 60_000; Date.now() < end;) {
         await new Promise(done => setTimeout(done, 3000));
         const next = await observe(page);
         if (!next.gates.some(gate => CAPTCHA_GATES.has(gate))) {
@@ -952,7 +968,7 @@ async function run() {
           if (next.url === current.url && await captchaTokenEmpty()) {
             await new Promise(done => setTimeout(done, 30_000));
             if (page.url() === current.url && await captchaTokenEmpty()) {
-              throw new Stop('captcha-rejected: the captcha closed after solving but issued no token, so the site cannot continue; apply in a normal browser');
+              throw new Stop('captcha-rejected: the captcha closed without issuing a token, so the site cannot continue; its tab stays open to solve again (or apply in a normal browser)');
             }
           }
           say('GATE captcha solved; resuming');
@@ -1412,6 +1428,9 @@ async function run() {
     const entriesUsed = new Set();
     const ruleRepeats = new Map();
     const ERROR_MESSAGE = /\b(required|invalid|error|must|please (enter|select|choose|provide|correct|complete|fix))\b/i;
+    // An optional field Jev already judged unanswerable from the stored answers (learned.noAnswer) stays empty: it
+    // holds back no forward step and is not asked about again.
+    const skippable = field => !field.required && learned.noAnswer.includes(learnLabel(field)) && !learned.fields[learnLabel(field)];
     function rulePlan(current, screen) {
       const fields = activeFields(current);
       // One try per screen, and at most three of the same action on one page: a control whose click only changes
@@ -1459,7 +1478,7 @@ async function run() {
         const ref = attest && (attest.optionRefs?.[0] ?? attest.ref);
         if (attest && fresh(`check:${ref}`)) return take(`check:${ref}`, { action: 'check', ref }, `required acknowledgement "${clean(labelOf(attest)).slice(0, 60)}"`);
       }
-      const blocking = field => isEmpty(field) && (field.required || !['checkbox', 'file', 'hidden'].includes(fieldType(field)));
+      const blocking = field => isEmpty(field) && (field.required || !['checkbox', 'file', 'hidden'].includes(fieldType(field))) && !skippable(field);
       // A dropdown trigger still showing its placeholder blocks when it is in a form, or (formless pages: Workday)
       // when its label marks it required ("Degree Select One Required").
       const placeholder = current.controls.some(control => control.current !== undefined
@@ -2544,12 +2563,20 @@ async function run() {
         // A step Jev already took on this exact screen through its ranking (no leading verdict) is not offered again
         // when the screen comes back: weak picks alternating between two screens otherwise loop without a stall.
         const exclude = new Set([...refused.actions, ...(plannedTaken.get(screen) ?? [])]);
-        try { outcome = await drive(modelView(current), { goal, ...context, exclude }); }
+        const skipFields = new Set(activeFields(current).filter(field => isEmpty(field) && skippable(field)).map(field => field.ref));
+        try { outcome = await drive(modelView(current), { goal, ...context, exclude, skipFields }); }
         catch (error) {
           runlog.trace('error', { phase: 'drive', message: String(error?.message ?? error), stack: String(error?.stack ?? '').slice(0, 600) });
           throw new Stop('driver-error', 1);
         }
         runlog.trace('jev', { goal, plan: outcome?.plan ?? null, confidence: outcome?.confidence ?? 0, ...outcome?.trace });
+        // Optional fields Jev judged no stored answer fits are remembered by label for the forward rule.
+        const unanswerable = activeFields(current).filter(field => !field.required && isEmpty(field)
+          && outcome?.trace?.fieldAnswers?.[field.ref] === 'none' && learnLabel(field) && !learned.noAnswer.includes(learnLabel(field)));
+        if (unanswerable.length) {
+          learned.noAnswer = [...learned.noAnswer, ...new Set(unanswerable.map(learnLabel))].slice(-500);
+          await saveLearned(learned);
+        }
         if (Number(outcome?.goalDone ?? 0) < 0.7 || goals[0].goal === BASE_GOAL.goal) break;
         completed.push(goals.shift());
         recent.length = 0;
@@ -3202,6 +3229,7 @@ async function run() {
       return;
     }
     say(`STOP: ${reason}`);
+    stopReason = reason;
     process.exitCode = error instanceof Stop ? error.code : 1;
   } finally {
     if (submitted && postSubmitEmail) await postSubmitEmail().catch(() => say('EMAIL post-submit: inbox check failed'));

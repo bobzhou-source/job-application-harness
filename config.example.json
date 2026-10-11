@@ -87,8 +87,7 @@
     "sound": "Glass"
   },
   "queue": {
-    "runTimeoutSeconds": 900,
-    "gateWaitSeconds": 300
+    "runTimeoutSeconds": 900
   },
   "runtime": {
     "debug": false

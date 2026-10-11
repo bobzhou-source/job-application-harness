@@ -107,12 +107,12 @@ function category(row) {
   const reason = String(row.reason ?? '');
   if (row.outcome === 'submitted') return ['submitted', ''];
   const table = [
-    [/captcha-rejected/i, 'captcha-rejected', 'user: apply in normal browser'],
+    [/captcha-rejected/i, 'captcha-rejected', 'user: captcha in held tab'],
     [/^account-blocked/i, 'account-blocked', 'user: contact job-board support'],
     [/already (applied|submitted)|application (is already|was) submitted/i, 'already-applied', ''],
     [/^site-down/i, 'site-down', 'rerun later'],
     [/posting-unavailable|no longer (available|accepting)|registration is closed|posting (is )?closed|no (job )?openings|could not be found|page you are looking for|no .*matching the target role|no link matching|all n(ot|on)[- ]matching|contain no /i, 'posting-gone', ''],
-    [/captcha|robot|human verification/i, 'captcha', 'user: solve captcha, rerun'],
+    [/captcha|robot|human verification/i, 'captcha', 'user: captcha in held tab'],
     [/date of birth|\bdob\b|birth ?date/i, 'needs-dob', 'user: DOB'],
     [/needs-user-document|transcript/i, 'needs-document', 'user: provide document'],
     [/sms|phone code|authenticator|gate mfa/i, 'needs-mfa', 'user: code'],

@@ -1,9 +1,9 @@
 // queue.mjs — apply to every posting in queue.tsv, one at a time, each submitted (or given up) before the next.
 //   bun queue.mjs [--discover] [--limit N]
-// --discover refills queue.tsv from Handshake (discover.mjs) whenever it runs dry, so the run keeps finding new jobs.
+// --discover refills queue.tsv from the configured discovery sources (discover.mjs) whenever it runs dry.
 // Per posting: a run that stops for a transient reason (model budget, planner/driver error) is retried once; a
-// CAPTCHA or MFA gate posts a notification, waits the configured gate time (queue.gateWaitSeconds), and retries
-// once; a site outage (site-down) moves the posting to the queue's end, at most twice; any other stop (a field or
+// CAPTCHA or MFA gate posts a notification and its tab stays open for the user to finish whenever they can; a site
+// outage (site-down) moves the posting to the queue's end, at most twice; any other stop (a field or
 // document only the user has, closed posting) moves on. Rows leave queue.tsv once
 // handled; results append to runs/queue-results.txt and each run's console output to runs/queue-logs/<name>.log.
 import { appendFileSync, mkdirSync, createWriteStream, existsSync, readFileSync } from 'node:fs';
@@ -19,7 +19,6 @@ const RESUMES = CONFIG.resumes.directory;
 const RESULTS = `${HERE}runs/queue-results.txt`;
 const LOGS = `${HERE}runs/queue-logs`;
 const RUN_SECONDS = CONFIG.queue.runTimeoutSeconds;
-const GATE_WAIT_MS = CONFIG.queue.gateWaitSeconds * 1000;
 const NOTIFICATIONS = CONFIG.notifications;
 if (NOTIFICATIONS.backend === 'macos-osascript' && process.platform !== 'darwin') {
   throw new Error('notifications.backend "macos-osascript" requires macOS; set notifications.backend to "console".');
@@ -112,10 +111,12 @@ while (handled < limit) {
       }
       record(`STOPPED (${reason.slice(0, 200)}) secs=${secs}`);
       if (retried) break;
-      if (GATE.test(reason)) {
-        notify(`${row.name}: ${reason.slice(0, 80)} — solve it in the automation Chrome within ${Math.round(GATE_WAIT_MS / 60_000)} min`);
-        await new Promise(r => setTimeout(r, GATE_WAIT_MS));
-      } else if (!(TRANSIENT.test(reason) || !run)) {
+      // A captcha or MFA step is left open in its own tab for the user to finish whenever they can; the queue moves on.
+      if (GATE.test(reason) || /^captcha-rejected/.test(reason)) {
+        notify(`${row.name}: ${reason.slice(0, 80)} — left open in the automation Chrome for you`);
+        break;
+      }
+      if (!(TRANSIENT.test(reason) || !run)) {
         // An outage outlasts an immediate retry: try again after the rest of the queue (at most twice per posting).
         if (/^site-down/.test(reason) && sitedown.get(jobKey(row.url)) !== 2) {
           sitedown.set(jobKey(row.url), (sitedown.get(jobKey(row.url)) ?? 0) + 1);

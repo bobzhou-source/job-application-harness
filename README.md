@@ -124,7 +124,7 @@ Use `--dry-run` to inspect matches without changing the queue.
 bun queue.mjs [--discover] [--limit N]
 ```
 
-The queue runs one application at a time with `--submit`, using the configured timeout and gate wait. `--discover` refills an empty queue. Results and per-job logs are written beneath the ignored `runs/` directory.
+The queue runs one application at a time with `--submit`, using the configured timeout. A CAPTCHA or MFA stop posts a notification and holds its tab open (recorded as `held` in `tabs.json`; never closed by tab trimming and not counted against `browser.maxTabs`) so you can finish it whenever you can; the queue moves on, and discovery never requeues postings that stopped waiting on you. `--discover` refills an empty queue. Results and per-job logs are written beneath the ignored `runs/` directory.
 
 Review `queue.tsv` and your local answers before running the queue: queued execution includes final-submit authorization.
 
@@ -227,8 +227,7 @@ The complete schema is:
     "sound": "Glass"
   },
   "queue": {
-    "runTimeoutSeconds": 900,
-    "gateWaitSeconds": 300
+    "runTimeoutSeconds": 900
   },
   "runtime": {
     "debug": false
@@ -294,7 +293,6 @@ False or empty values mean “do not make this claim”; they are not converted 
 - `credentials.backend`: currently `macos-keychain` only. `servicePrefix` defaults to `job-app:`.
 - `notifications.backend`: `console` or macOS-only `macos-osascript`; `title` and `sound` configure notifications.
 - `queue.runTimeoutSeconds`: per-application timeout; default `900`.
-- `queue.gateWaitSeconds`: time allowed for a user gate; default `300`.
 - `runtime.debug`: enables debug output.
 
 API keys are the only environment configuration. All other settings belong in `config.json`.
@@ -311,7 +309,7 @@ The example is intentionally fictional. Replace every value with your own facts,
 Other ignored local inputs and caches:
 
 - `profile.md`: optional writing dossier containing stories, voice, themes, and “do not” guidance.
-- `learned.json`: accepted field mappings, choice aliases, and per-host lessons from successful recoveries.
+- `learned.json`: accepted field mappings, choice aliases, per-host lessons from successful recoveries, and `noAnswer` (optional field labels the driver judged no stored answer fits; they no longer block the deterministic Next/Submit rule or get asked about again).
 - `aliases.json`: equivalent forms and site-accepted alternatives for stored facts.
 - `tabs.json`: posting-to-tab resume state.
 - `queue.tsv` and `runs/`: queued work, traces, logs, and reports.
@@ -359,7 +357,7 @@ Add the fact or normalized question to `answers.json`, or rerun with `--answer "
 
 ### The run stops at CAPTCHA, MFA, DOB, or a document request
 
-Complete the user-only step in the retained browser tab, add the missing document/fact if applicable, and rerun. The stop is intentional.
+Complete the user-only step in the retained browser tab (CAPTCHA and MFA tabs stay held open until you close them), add the missing document/fact if applicable, and rerun or submit there. The stop is intentional.
 
 ### Email verification says automation is disabled
 

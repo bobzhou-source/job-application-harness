@@ -88,7 +88,7 @@ All of the following are ignored by Git and stay on the machine:
 - `config.json`, `.env` — local configuration and secrets.
 - `answers.json` — `facts` and the reusable `qa` registry.
 - `profile.md` — optional writing dossier.
-- `learned.json` — accepted field mappings, choice aliases, per-host lessons.
+- `learned.json` — accepted field mappings, choice aliases, per-host lessons, and `noAnswer` optional-field labels (skipped by the forward rule and by Jev's field questions).
 - `aliases.json` — equivalent forms and site-accepted alternatives for facts.
 - `tabs.json` — posting→tab resume state.
 - `queue.tsv`, `runs/` — queued work, per-run traces, logs, and reports.
