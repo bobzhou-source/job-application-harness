@@ -1,0 +1,9 @@
+# Overlay for the harness's one-shot `omp -p` model calls: no long-term memory recall/retain, no auto-learn.
+# Memory recall loads an embedding model per call and retain stores application text; both slow every call as the bank grows.
+memory:
+  backend: off
+autolearn:
+  enabled: false
+mnemopi:
+  autoRecall: false
+  autoRetain: false

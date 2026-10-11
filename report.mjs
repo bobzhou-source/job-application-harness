@@ -16,7 +16,12 @@ const last = Number(arg('--last') ?? 0);
 const since = arg('--since');
 
 // Lane reverse-matched from the configured resume filename pattern, e.g. "resume_{lane}.pdf".
-const { filePattern } = loadConfig().resumes;
+const { filePattern, directory: resumeDir, fallbackLane } = loadConfig().resumes;
+// The resume apply.mjs uploads for a lane: the lane's own file, else the fallback lane's.
+const laneResume = lane => {
+  const own = filePattern.replace('{lane}', lane);
+  return existsSync(`${resumeDir}/${own}`) || !fallbackLane ? own : filePattern.replace('{lane}', fallbackLane);
+};
 const [RESUME_PREFIX, RESUME_SUFFIX] = filePattern.split('{lane}');
 const escapeRegex = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const RESUME_NAME = new RegExp(`^${escapeRegex(RESUME_PREFIX)}(.*)${escapeRegex(RESUME_SUFFIX)}$`);
@@ -156,8 +161,8 @@ function applications(runs) {
     // Workday-style review pages show no file chip at submit; then the files uploaded during the run stand in.
     const sent = final.submittedWith?.length ? final.submittedWith : final.uploaded ?? [];
     const resumeSent = sent.find(file => /resume|cv/i.test(file)) ?? '';
-    // A submission whose recorded resume is not the lane's configured file is flagged for follow-up.
-    const expectedResume = lane ? filePattern.replace('{lane}', lane) : '';
+    // A submission whose recorded resume is not the lane's resume (or the fallback's) is flagged for follow-up.
+    const expectedResume = lane ? laneResume(lane) : '';
     const resumeOk = !done ? '' : !resumeSent ? 'unrecorded'
       : expectedResume && resumeSent.split(/[\\/]/).pop() !== expectedResume ? 'WRONG' : 'ok';
     return {
