@@ -26,7 +26,7 @@ const rules = await import('./lib/rules.mjs');
 const { planGoals, expandAliases, rewriteValue, pickCode, pickPreference, writeAnswers } = await import('./lib/planner.mjs');
 const email = await import('./lib/email.mjs');
 const { drive, pickOption, plan: jevPlan } = await import('./lib/jev.mjs');
-const { coverLetter, instructedDocument, tailoredResume } = await import('./lib/coverletter.mjs');
+const { coverLetter, coverLetterText, instructedDocument, tailoredResume } = await import('./lib/coverletter.mjs');
 const answers = await import('./lib/answers.mjs');
 const credentials = await import('./lib/credentials.mjs');
 const runlog = await import('./lib/trace.mjs');
@@ -1398,7 +1398,18 @@ async function run() {
       }));
       phase = 'writer';
       const job = { title: current.title, site: credentials.hostFromUrl(current.url), page: String(current.pageText ?? '').slice(0, 3000) };
-      const written = await writeAnswers({ job, applicant, questions });
+      // A "Cover Letter" text box gets this posting's full tailored letter (the same one a file slot would get), not
+      // a short essay; the rest go to the answer writer.
+      const COVER_BOX = /^\s*(cover letter|letter of interest|cover letter text)\s*\*?\s*$/i;
+      const written = {};
+      for (const field of fields.filter(field => fieldType(field) === 'textarea' && COVER_BOX.test(labelOf(field)))) {
+        const text = await coverLetterText({ url: runUrl, title: clean(current.title), employer: null, pageText: `${postingText}\n${String(current.pageText ?? '')}`.slice(0, 6000) })
+          .catch(error => { say(`COVER letter text failed (${clean(error?.message).slice(0, 120)})`); return null; });
+        const limit = limitOf(field);
+        if (text && (!limit || text.length <= limit)) written[field.ref] = text;
+      }
+      const rest = questions.filter(question => !written[question.ref]);
+      if (rest.length) Object.assign(written, await writeAnswers({ job, applicant, questions: rest }));
       runlog.trace('writer', { refs, written: Object.keys(written) });
       const fills = [];
       for (const field of fields) {
@@ -1815,11 +1826,23 @@ async function run() {
         if (!shown.length || visited.has(signature)) needsField(field, 'opening and picking did not commit a choice');
         visited.add(signature);
         // A child list under the chosen parent ("Other" → "Source Not Listed") with one entry is the only completion.
-        const label = exact(shown.map(option => option.label))
+        let label = exact(shown.map(option => option.label))
           ?? (preferred && shown.some(option => option.label === preferred) ? preferred : null)
           ?? (depth > 0 && shown.length === 1 ? shown[0].label : null)
           ?? await chooseOption(labelOf(field), value, shown.map(option => option.label), candidates);
         preferred = null;
+        // The key's value names no listed option (a yes/no answer under "Undergraduate"/"Graduate"): the writer picks
+        // the one option the applicant facts support, once per field, as for native selects above.
+        const real = shown.map(option => option.label).filter(choice => !PLACEHOLDER_OPTION.test(String(choice)));
+        if (!shown.some(candidate => candidate.label === label) && real.length >= 2 && real.length <= 60
+            && !writeTried.has(`${current.url}|pref|${labelOf(field)}`)) {
+          writeTried.add(`${current.url}|pref|${labelOf(field)}`);
+          const job = { title: current.title, site: credentials.hostFromUrl(current.url), page: String(postingText || current.pageText || '').slice(0, 3000) };
+          const question = [labelOf(field), clean(field.context ?? '')].filter(Boolean).join(' — ').slice(0, 300);
+          label = await pickPreference({ job, applicant: await writerApplicant(), question, options: real });
+          say(`WRITER choice "${clean(labelOf(field))}" = ${label ? `"${clean(label)}"` : 'none'} (no option matched ${key})`);
+          if (label) remember(labelOf(field), label);
+        }
         const option = shown.find(candidate => candidate.label === label);
         if (!option) needsField(field, `no owned option matches the stored answer or its aliases (shown: ${shown.slice(0, 6).map(candidate => `"${clean(candidate.label).slice(0, 40)}"`).join(', ')})`);
         // An empty field's "selected" option is only the keyboard highlight (Workday marks the first entry of a
