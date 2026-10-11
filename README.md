@@ -137,20 +137,23 @@ bun report.mjs --apps [--since ISO]
 
 The default report summarizes per-run telemetry. `--apps` folds all attempts for each posting into an application tracker and writes `runs/applications.csv`, including status, the employer's latest reply, next actor, attempts, time, model cost, and submitted document information.
 
-### Track employer replies and outreach
+### Track employer replies, to-dos, and outreach
 
 ```sh
-bun mail.mjs [--since ISO] [--follow-up DAYS]
+bun mail.mjs [--since ISO] [--follow-up DAYS]   # sync: index job email, rebuild to-dos, print outcomes
+bun mail.mjs todo                                # open to-dos from the last sync, most urgent first
+bun mail.mjs open N                              # open to-do N's action link (assessment, scheduling, application) in the browser
+bun mail.mjs done N | undo N                     # mark to-do N handled, or reopen it
 ```
 
-Requires `email.enabled`. It reads the configured inbox (read-only) and writes `runs/mail.json`; `report.mjs --apps` then fills its `reply` column from that file.
+Requires `email.enabled`. A sync reads the configured inbox (read-only) and writes `runs/mail.json`; `report.mjs --apps` then fills its `reply` column from that file.
 
-- **Employer replies:** mail since `--since` is matched to the posting it answers by sender and subject (company name, ATS tenant, or the employer's own domain; bodies are never used for matching). The default `--since` is the first submitted application. Each reply is classified as `confirmed`, `incomplete`, `rejected`, `assessment`, `interview`, or `update`, using fixed patterns that ignore conditional boilerplate such as "if selected, we will schedule an interview".
-  - The report lists postings that a run recorded as stopped but the employer answered anyway (proof the submit went through).
-  - It also lists job-like mail that matches no attempted posting (applications made outside the harness).
+- **Index:** every job email since `--since` (default: the first attempted application) is matched to the posting it answers by sender and subject: company name, ATS tenant, or the employer's own domain. Bodies are never used for matching. A subject naming a different role at the same employer is not attributed to the posting. Mail matching no posting is indexed under the sender's employer.
+- **Outcomes:** each email is classified as `offer`, `rejected`, `completed` (an assessment acknowledged), `assessment`, `interview`, `incomplete`, `confirmed`, or `update`. Fixed patterns ignore conditional and negated boilerplate such as "if selected, we will schedule an interview" or "this email is not an offer of employment". The sync lists offers, interview requests and rejections, postings a run recorded as stopped that the employer answered anyway (proof the submit went through), and job mail from applications made outside the harness.
+- **To-dos:** offers, assessments, interview requests and incomplete-application notices become items with the deadline the email states ("by October 15", "within 5 days") and its action link. Repeated reminders fold into one item. An item closes when a later email shows the step handled (a completed assessment, a decision, a confirmation of the unfinished application) or when you mark it done; marks persist in `runs/mail-done.json`. Links carry access tokens, so only their host is printed.
 - **Outreach:** emails you sent with a resume attached (a file matching `resumes.filePattern`) are tracked as threads: `replied`, `bounced`, `auto-reply`, `waiting`, or `follow-up` once `--follow-up` days (default 7) pass since your last message.
 
-No model sees any mail. Message text is cached in `runs/mail.json` so later syncs only fetch new mail.
+No model sees any mail. Message text and links are cached in `runs/mail.json`, so later syncs only fetch new mail.
 
 ## Configuration reference
 
