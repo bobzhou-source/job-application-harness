@@ -25,19 +25,19 @@ Model backends are selected in `config.json`. The public example uses OpenRouter
 | File | Responsibility |
 |---|---|
 | `lib/config.mjs` | Load/validate/normalize `config.json`; expand paths; read API-key environment names (`loadConfig`, `expandConfigPath`, `requireSecret`). |
-| `lib/browser.mjs` | Chrome CDP connect, tab open/list, popup adoption. |
-| `lib/snapshot.mjs` | In-page DOM snapshot with stable refs and gate detection. |
-| `lib/act.mjs` | Trusted click/type/select/upload/press by ref. |
+| `lib/browser.mjs` + `lib/browser/` | Chrome CDP connect (`endpoint`: DevToolsActivePort discovery and launch; `transport`: websocket attach-or-launch), `tabs` (the `tabs.json` registry), `manage` (tab open/reuse, trimming, popup adoption), `front`. |
+| `lib/snapshot.mjs` + `lib/snapshot/` | In-page DOM snapshot with stable refs and gate detection. The in-page program is assembled from ordered fragments (`core`, `text`, `labels`, `discovery`, `scan`, `groups`, `options`, `output`) that share one scope in the page; part order matters. |
+| `lib/act.mjs` + `lib/act/` | Trusted click/type/select/upload/press by ref; `resolve` (ref → element handle), `press`, `select-helpers` (ARIA/custom dropdowns and search companions). |
 | `lib/rules.mjs` | Deterministic control classification, answer matching, and final-submit safety. |
-| `lib/planner.mjs` | Planner backend: tool-free call returning an ordered goal list or guidance. |
-| `lib/jev.mjs` | Driver backend: one request per screen returning a local action and confidence. |
+| `lib/planner.mjs` + `lib/planner/` | Planner backend: tool-free call returning an ordered goal list or guidance. `backend` (HTTP/omp transport, pricing), `input` (bounded prompt data), `plan-output` (plan parsing/validation), `answers`, `documents`, `codes`, `system-prompt`, `logistics`, `limits`. |
+| `lib/jev.mjs` + `lib/jev/` | Driver backend: one request per screen returning a local action and confidence. `transport` (metered Decisions call), `state` (bounded screen state), `questions`, `fields`, `constants`. |
 | `lib/answers.mjs` | `answers.json` load/save and question normalization. |
 | `lib/credentials.mjs` | Keychain generate/store/fill for employer accounts. |
 | `lib/email.mjs` | Read-only Gmail access: verification codes and links, and message/thread reads for reply tracking. |
 | `lib/mail/` | Deterministic mail tracking, used by `mail.mjs`: `postings` (attempted postings as match candidates), `inbox` (read-only job-mail indexing and outreach threads), `match` (employer keys and sender/subject matching), `classify` (reply kind, stated deadline, action link), `todos` (posting status and to-do items), `store` (`runs/mail*.json`), `print` (console views). |
-| `apply.mjs` | Persistent Chrome session and the observe → drive → validate → act loop. |
+| `apply.mjs` + `lib/apply/` | CLI entry; `session` owns the Chrome session and the observe → drive → validate → act loop over one per-run `state` (ctx) object. Each pass (`pass`) runs `preflight` (gates, sign-in, stops) → `prepare` (screen context, uploads) → `choose` (rule plan, then model consult) → `execute` (fills, clicks, advance). Helpers: `observer`, `observe`, `screen`, `controls`, `plan`, `steprules`, `pick`/`picker`, `accounts`, `emailcode`, `writer`, `values`, `fields`, `confirm`, `stop`, `runtime`. |
 | `queue.mjs`, `discover.mjs`, `report.mjs`, `mail.mjs` | Queue execution, posting discovery, run/application reporting, and employer-reply/outreach sync. |
-| `setup.mjs` | Idempotent local setup and read-only doctor. |
+| `setup.mjs` + `lib/setup/` | Idempotent local setup and read-only doctor: `scaffold`, `dotenv`, `checks`, `report`, `fsutil`, `paths`. |
 
 ## Trust boundaries
 
