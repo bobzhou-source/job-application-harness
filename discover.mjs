@@ -61,6 +61,9 @@ export function jobKey(url) {
 
 // Per posting, from every recorded run: done (submitted, closed, or already applied) and how many runs stopped.
 const TERMINAL = /already (applied|submitted|shows|records|been applied)|previously submitted|submitted successfully|application was submitted|applied on|not accepting|no longer|is closed|registration is closed|unable to apply|cannot be applied|not currently applicable|not open for applications|must wait|posting-unavailable|SUBMITTED earlier/i;
+// A stop that waits on the user (a captcha to solve by hand, an answer, a document, a mailbox link) ends the same way
+// on every retry: the posting is the user's now and is never queued again.
+const USER_WAIT = /^(captcha-rejected|needs-user|needs-document|gate (captcha|mfa))/i;
 export function jobHistory() {
   const runs = new Map();
   if (!existsSync(SUMMARY_FILE)) return runs;
@@ -70,7 +73,7 @@ export function jobHistory() {
     if (!key) continue;
     const entry = runs.get(key) ?? { stopped: 0, done: false, submitted: false };
     if (row.outcome === 'submitted') entry.submitted = true;
-    if (row.outcome === 'submitted' || TERMINAL.test(row.reason ?? '')) entry.done = true;
+    if (row.outcome === 'submitted' || TERMINAL.test(row.reason ?? '') || USER_WAIT.test(row.reason ?? '')) entry.done = true;
     else entry.stopped += 1;
     runs.set(key, entry);
     // The employer posting a Handshake run applied through is the same posting when a listings feed links to it.

@@ -92,7 +92,7 @@ while (handled < limit) {
   const history = jobHistory().get(jobKey(row.url));
   deferred = null;
   if (history?.done) {
-    record(`=== ${row.name} (${row.lane}) ${row.url}\nSKIPPED (already ${history.submitted ? 'submitted' : 'closed or applied'})`);
+    record(`=== ${row.name} (${row.lane}) ${row.url}\nSKIPPED (${history.submitted ? 'already submitted' : 'closed, applied, or waiting on the user'})`);
   } else {
     record(`=== ${row.name} (${row.lane}) ${row.url}`);
     let retried = false;
