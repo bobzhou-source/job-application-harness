@@ -135,7 +135,22 @@ bun report.mjs
 bun report.mjs --apps [--since ISO]
 ```
 
-The default report summarizes per-run telemetry. `--apps` folds all attempts for each posting into an application tracker and writes `runs/applications.csv`, including status, next actor, attempts, time, model cost, and submitted document information.
+The default report summarizes per-run telemetry. `--apps` folds all attempts for each posting into an application tracker and writes `runs/applications.csv`, including status, the employer's latest reply, next actor, attempts, time, model cost, and submitted document information.
+
+### Track employer replies and outreach
+
+```sh
+bun mail.mjs [--since ISO] [--follow-up DAYS]
+```
+
+Requires `email.enabled`. It reads the configured inbox (read-only) and writes `runs/mail.json`; `report.mjs --apps` then fills its `reply` column from that file.
+
+- **Employer replies:** mail since `--since` is matched to the posting it answers by sender and subject (company name, ATS tenant, or the employer's own domain; bodies are never used for matching). The default `--since` is the first submitted application. Each reply is classified as `confirmed`, `incomplete`, `rejected`, `assessment`, `interview`, or `update`, using fixed patterns that ignore conditional boilerplate such as "if selected, we will schedule an interview".
+  - The report lists postings that a run recorded as stopped but the employer answered anyway (proof the submit went through).
+  - It also lists job-like mail that matches no attempted posting (applications made outside the harness).
+- **Outreach:** emails you sent with a resume attached (a file matching `resumes.filePattern`) are tracked as threads: `replied`, `bounced`, `auto-reply`, `waiting`, or `follow-up` once `--follow-up` days (default 7) pass since your last message.
+
+No model sees any mail. Message text is cached in `runs/mail.json` so later syncs only fetch new mail.
 
 ## Configuration reference
 

@@ -14,7 +14,8 @@
     "apply": "bun apply.mjs",
     "queue": "bun queue.mjs",
     "discover": "bun discover.mjs",
-    "report": "bun report.mjs"
+    "report": "bun report.mjs",
+    "mail": "bun mail.mjs"
   },
   "dependencies": {
     "puppeteer-core": "latest",

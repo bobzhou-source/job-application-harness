@@ -3,8 +3,9 @@
 // Model cost is metered per run and bucketed by role (driver/planner/writer); the native planner backend's cost is
 // estimated from token usage and list price, HTTP backends use the provider's billed usage.
 // `bun report.mjs --apps [--since ISO]` is the application tracker instead: one row per posting (all its runs folded
-// together) with lane, title, latest status, stop category, who must act next, attempts, time, cost, and the resume
-// and documents it went out with; written to runs/applications.csv and summarized by category.
+// together) with lane, title, latest status, the employer's latest reply (runs/mail.json, written by `bun mail.mjs`),
+// stop category, who must act next, attempts, time, cost, and the resume and documents it went out with; written to
+// runs/applications.csv and summarized by category.
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './lib/config.mjs';
@@ -142,6 +143,9 @@ function applications(runs) {
     list.push(run);
     byJob.set(run.job, list);
   }
+  // The employer's latest reply per posting, from the last `bun mail.mjs` sync.
+  const mailPath = new URL('./runs/mail.json', import.meta.url);
+  const mail = existsSync(mailPath) ? JSON.parse(readFileSync(mailPath, 'utf8')) : null;
   const apps = [...byJob].map(([job, list]) => {
     const latest = list.at(-1);
     const done = list.find(run => run.outcome === 'submitted');
@@ -158,22 +162,22 @@ function applications(runs) {
       : expectedResume && resumeSent.split(/[\\/]/).pop() !== expectedResume ? 'WRONG' : 'ok';
     return {
       last: latest.t.slice(0, 16).replace('T', ' '), job: job.replace(/^https?:\/\//, ''), lane,
-      name: info.name ?? final.title ?? '', status, who, attempts: list.length,
+      name: info.name ?? final.title ?? '', status, reply: mail?.byJob?.[job]?.kind ?? '', who, attempts: list.length,
       secs: Math.round(list.reduce((s, run) => s + (run.secs ?? 0), 0)), cost: list.reduce((s, run) => s + (run.cost ?? 0), 0),
       consults: list.reduce((s, run) => s + (run.models?.deepseek?.calls ?? 0), 0), site: final.site ?? '',
       resume: resumeSent, resumeOk, tailored: final.tailored ? 'yes' : '', documents: sent.join(' ; '), reason: final.outcome === 'submitted' ? '' : String(final.reason ?? '').slice(0, 160),
     };
   });
-  const columns = ['last', 'job', 'lane', 'name', 'status', 'who', 'attempts', 'secs', 'cost', 'consults', 'site', 'resume', 'resumeOk', 'tailored', 'documents', 'reason'];
+  const columns = ['last', 'job', 'lane', 'name', 'status', 'reply', 'who', 'attempts', 'secs', 'cost', 'consults', 'site', 'resume', 'resumeOk', 'tailored', 'documents', 'reason'];
   const cell = value => { const text = typeof value === 'number' ? String(Math.round(value * 1e4) / 1e4) : String(value ?? ''); return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text; };
   const csv = [columns.join(','), ...apps.map(app => columns.map(column => cell(app[column])).join(','))].join('\n');
   const out = fileURLToPath(new URL('./runs/applications.csv', import.meta.url));
   writeFileSync(out, `${csv}\n`);
 
-  console.log('last              lane      status             tries   time    cost  resume      name / reason');
+  console.log('last              lane      status             reply       tries   time    cost  resume      name / reason');
   for (const app of apps) {
     console.log([
-      app.last.padEnd(16), app.lane.padEnd(9), app.status.padEnd(18), String(app.attempts).padStart(5),
+      app.last.padEnd(16), app.lane.padEnd(9), app.status.padEnd(18), (app.reply || '-').padEnd(10), String(app.attempts).padStart(5),
       secs(app.secs).padStart(6), money(app.cost).padStart(7), (app.resumeOk || '-').padEnd(10),
       `${app.name.slice(0, 50)}${app.reason ? ` — ${app.reason.slice(0, 60)}` : ''}`,
     ].join(' '));
@@ -184,6 +188,12 @@ function applications(runs) {
   const spent = apps.reduce((s, app) => s + app.cost, 0);
   console.log(`  cost ${money(spent)} total, ${submittedApps.length ? money(spent / submittedApps.length) : 'n/a'} per submission; `
     + `resume check on submissions: ${tally(submittedApps, app => app.resumeOk).map(([k, c]) => `${k} ${c}`).join(', ')}`);
+  if (mail) {
+    const replies = tally(apps.filter(app => app.reply), app => app.reply);
+    const proved = apps.filter(app => app.status !== 'submitted' && ['confirmed', 'rejected', 'assessment', 'interview'].includes(app.reply)).length;
+    console.log(`  employer replies (mail synced ${mail.syncedAt.slice(0, 16).replace('T', ' ')} UTC): ${replies.map(([k, c]) => `${k} ${c}`).join(', ') || 'none'}`
+      + `${proved ? `; ${proved} not recorded as submitted but answered by the employer` : ''}`);
+  } else console.log('  employer replies: run `bun mail.mjs` to sync them');
   const waiting = tally(apps.filter(app => app.who), app => app.who);
   if (waiting.length) {
     console.log('  next action:');

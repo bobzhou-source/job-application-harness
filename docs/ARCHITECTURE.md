@@ -33,9 +33,10 @@ Model backends are selected in `config.json`. The public example uses OpenRouter
 | `lib/jev.mjs` | Driver backend: one request per screen returning a local action and confidence. |
 | `lib/answers.mjs` | `answers.json` load/save and question normalization. |
 | `lib/credentials.mjs` | Keychain generate/store/fill for employer accounts. |
-| `lib/email.mjs` | Read-only verification email access. |
+| `lib/email.mjs` | Read-only Gmail access: verification codes and links, and message/thread reads for reply tracking. |
+| `lib/mailtrack.mjs` | Deterministic reply tracking: employer match keys, sender/subject matching, reply classification, outreach thread status. |
 | `apply.mjs` | Persistent Chrome session and the observe → drive → validate → act loop. |
-| `queue.mjs`, `discover.mjs`, `report.mjs` | Queue execution, posting discovery, and run/application reporting. |
+| `queue.mjs`, `discover.mjs`, `report.mjs`, `mail.mjs` | Queue execution, posting discovery, run/application reporting, and employer-reply/outreach sync. |
 | `setup.mjs` | Idempotent local setup and read-only doctor. |
 
 ## Trust boundaries
@@ -45,6 +46,7 @@ Model backends are selected in `config.json`. The public example uses OpenRouter
 - **Uploads are restricted.** Only the configured resume, its posting-tailored rewrite (validated against the resume sources: same role headings, dates, and numbers; one page), or a writer-drafted document (cover letter, or an instructed “other documents” slot) is uploaded, and only into a current resume/document field.
 - **Refs are revalidated.** Every action is checked against a fresh snapshot before it runs; a stale ref is rejected, and a queued action whose ref vanished drops the rest of that queue because the screen moved on.
 - **Passwords are not a stop.** `lib/credentials.mjs` generates and fills employer-account passwords from the configured credential backend. Password values never appear in prompts, logs, snapshots, or reports.
+- **Reply tracking is local and read-only.** `mail.mjs` only issues Gmail GETs; matching and classification are fixed patterns in `lib/mailtrack.mjs`, so no mail reaches a model.
 
 ## A run, step by step
 
@@ -91,7 +93,7 @@ All of the following are ignored by Git and stay on the machine:
 - `learned.json` — accepted field mappings, choice aliases, per-host lessons, and `noAnswer` optional-field labels (skipped by the forward rule and by Jev's field questions).
 - `aliases.json` — equivalent forms and site-accepted alternatives for facts.
 - `tabs.json` — posting→tab resume state.
-- `queue.tsv`, `runs/` — queued work, per-run traces, logs, and reports.
+- `queue.tsv`, `runs/` — queued work, per-run traces, logs, and reports; `runs/mail.json` holds synced employer replies, outreach thread status, and the cached text of matched mail.
 
 ## Configuration flow
 
