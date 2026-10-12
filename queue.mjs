@@ -4,7 +4,9 @@
 // Per posting: a run that stops for a transient reason (model budget, planner/driver error) is retried once; a
 // CAPTCHA or MFA gate posts a notification and its tab stays open for the user to finish whenever they can; a site
 // outage (site-down) moves the posting to the queue's end, at most twice; any other stop (a field or
-// document only the user has, closed posting) moves on. Rows leave queue.tsv once
+// document only the user has, closed posting) moves on. Postings on a domain where at least 3 runs hit a CAPTCHA and
+// none submitted are set aside for manual application without a run; 3 postings in a row failing in the model
+// provider (out of credits) halt the queue. Rows leave queue.tsv once
 // handled; results append to runs/queue-results.txt and each run's console output to runs/queue-logs/<name>.log.
 import { appendFileSync, mkdirSync, createWriteStream, existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -61,6 +63,25 @@ function lastRun(url, since) {
   return rows.at(-1) ?? null;
 }
 
+// A site's registrable domain ("careers-sas.icims.com" → "icims.com"): one ATS shares one CAPTCHA policy.
+const siteOf = url => new URL(url).host.split('.').slice(-2).join('.');
+// Domains whose every run so far hit a CAPTCHA (at least 3, none submitted): more runs there only open more tabs
+// for the user, so their postings are set aside for manual application. Recomputed per posting from summary.jsonl.
+function captchaSites() {
+  const tally = new Map();
+  for (const line of readFileSync(`${HERE}runs/summary.jsonl`, 'utf8').split('\n')) {
+    let row;
+    try { row = JSON.parse(line); } catch { continue; }
+    if (!row.job) continue;
+    const site = siteOf(row.job);
+    const count = tally.get(site) ?? { captcha: 0, submitted: 0 };
+    if (row.outcome === 'submitted') count.submitted += 1;
+    else if (GATE.test(row.reason ?? '') && !/\bmfa\b/i.test(row.reason ?? '')) count.captcha += 1;
+    tally.set(site, count);
+  }
+  return new Set([...tally].filter(([, count]) => count.captcha >= 3 && count.submitted === 0).map(([site]) => site));
+}
+
 function notify(text) {
   if (NOTIFICATIONS.backend === 'console') {
     console.log(`[notification] ${text}`);
@@ -82,6 +103,9 @@ let handled = 0;
 // Site-down deferrals per posting this queue run, and the posting the current pass moves to the queue's end.
 const sitedown = new Map();
 let deferred = null;
+// Consecutive postings whose runs all failed in the model provider (out of credits, provider outage): every later
+// posting would fail the same way, so the queue halts keeping the posting queued.
+let providerFailures = 0;
 while (handled < limit) {
   let queue = readQueue();
   if (!queue.length && refill) { await discover(); queue = readQueue(); }
@@ -92,6 +116,8 @@ while (handled < limit) {
   deferred = null;
   if (history?.done) {
     record(`=== ${row.name} (${row.lane}) ${row.url}\nSKIPPED (${history.submitted ? 'already submitted' : 'closed, applied, or waiting on the user'})`);
+  } else if (captchaSites().has(siteOf(row.url))) {
+    record(`=== ${row.name} (${row.lane}) ${row.url}\nSET ASIDE (every run on ${siteOf(row.url)} hit a CAPTCHA; apply manually)`);
   } else {
     record(`=== ${row.name} (${row.lane}) ${row.url}`);
     let retried = false;
@@ -100,6 +126,8 @@ while (handled < limit) {
       const run = await apply(row, logName);
       const secs = Math.round((Date.now() - started) / 1000);
       const reason = run?.reason ?? `no summary (killed after ${RUN_SECONDS}s or crashed)`;
+      const providerDown = run?.outcome !== 'submitted' && /^(driver-error|planner-error)/.test(reason);
+      if (!providerDown) providerFailures = 0;
       if (run?.outcome === 'submitted') { record(`SUBMITTED secs=${secs} cost=$${run.cost?.toFixed(4)}`); break; }
       // A blocked job-board account fails every remaining posting the same way and more traffic prolongs the block:
       // the queue ends here, keeping this posting queued.
@@ -110,7 +138,16 @@ while (handled < limit) {
         process.exit(0);
       }
       record(`STOPPED (${reason.slice(0, 200)}) secs=${secs}`);
-      if (retried) break;
+      if (retried) {
+        if (providerDown) providerFailures += 1;
+        if (providerFailures >= 3) {
+          record('QUEUE_HALTED model-provider errors on 3 postings in a row (check provider credits)');
+          notify('Job queue halted: model provider failing (check credits)');
+          record('QUEUE_DONE');
+          process.exit(0);
+        }
+        break;
+      }
       // A captcha or MFA step is left open in its own tab for the user to finish whenever they can; the queue moves on.
       if (GATE.test(reason) || /^captcha-rejected/.test(reason)) {
         notify(`${row.name}: ${reason.slice(0, 80)} — left open in the automation Chrome for you`);
