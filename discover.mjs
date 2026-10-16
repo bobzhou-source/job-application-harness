@@ -1,7 +1,8 @@
 // discover.mjs — find new internship postings and append them to queue.tsv (url<TAB>lane<TAB>name) for queue.mjs.
 // Sources (discovery.sources): Handshake searches, the SimplifyJobs listings feed, ATS boards (Greenhouse/Lever/Ashby
-// APIs), markdown internship lists (GitHub READMEs), LinkedIn's guest job search (resolved to employer URLs), and the
-// freehire.me aggregator.
+// APIs), markdown/JSON internship lists (GitHub READMEs and their data files), LinkedIn's guest job search (resolved
+// to employer URLs), the freehire.me aggregator, the Levels.fyi internship JSON, and the northwesternfintech quant
+// internship YAML directory.
 // With discovery.minHourly set, a posting is queued only when its own page states pay above it. Postings any earlier
 // run submitted, found closed or already applied, or tried twice are never queued again (runs/summary.jsonl).
 //   bun discover.mjs [--query "software engineer intern"]... [--pages N] [--max N] [--dry-run]
@@ -11,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import * as browser from './lib/browser.mjs';
 import { loadConfig } from './lib/config.mjs';
 import { blockedHosts, hostOfUrl } from './lib/blocked-hosts.mjs';
-import { postingDetails, boardPostings, markdownPostings, linkedinPostings, freehirePostings, workdayPostings } from './lib/discover/sources.mjs';
+import { postingDetails, boardPostings, markdownPostings, linkedinPostings, freehirePostings, workdayPostings, levelsPostings, quantYamlPostings } from './lib/discover/sources.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 export const QUEUE_FILE = `${HERE}queue.tsv`;
@@ -159,17 +160,19 @@ async function main() {
       if (full(source)) break;
       if (!fits(posting.title, posting.company) || /\b(fall|spring|winter)\b|2026\b/i.test(posting.title)) continue;
       if (located && posting.location && !posting.location.split(/\s*[;|•]\s*|\s+or\s+/i).some(place => located.test(place))) continue;
-      take(jobKey(posting.url), laneFor(posting.title, posting.company), `${posting.company} — ${posting.title}`, source, posting.url,
+      take(jobKey(posting.url), posting.lane ?? laneFor(posting.title, posting.company), `${posting.company} — ${posting.title}`, source, posting.url,
         { pay: posting.pay, text: posting.text, location: posting.location });
     }
   };
   const { sources } = CONFIG.discovery;
 
   if (sources.includes('listings')) await fromListings({ take, fits, max: limit, found });
-  if (sources.includes('lists')) takeAll(await markdownPostings(CONFIG.discovery.lists), 'lists');
+  if (sources.includes('lists')) takeAll(await markdownPostings(CONFIG.discovery.lists, CONFIG.discovery.fx), 'lists');
   if (sources.includes('boards')) takeAll(await boardPostings(CONFIG.discovery.boards), 'boards');
   if (sources.includes('freehire')) takeAll(await freehirePostings(CONFIG.discovery.freehire, CONFIG.discovery.fx), 'freehire');
   if (sources.includes('linkedin')) takeAll(await linkedinPostings(CONFIG.discovery.linkedin), 'linkedin');
+  if (sources.includes('levelsfyi')) takeAll(await levelsPostings(CONFIG.discovery.fx), 'levelsfyi');
+  if (sources.includes('quantlists')) takeAll(await quantYamlPostings({ laneFor }), 'quantlists');
   if (sources.includes('handshake') && found.length < limit) {
     await fromHandshake({ take, fits, spent, queued, queries, pages, max: limit, found, dryRun });
   }
@@ -179,6 +182,10 @@ async function main() {
   const mixed = Array.from({ length: Math.max(0, ...[...bySource.values()].map(rows => rows.length)) }, (_, i) => [...bySource.values()].map(rows => rows[i]).filter(Boolean)).flat();
   const kept = gated ? await payGate(mixed, max) : found;
   for (const row of kept) console.log(`${row.lane}\t${row.name}\t${row.url}\t(${row.source})`);
+  const keptBySource = Map.groupBy(kept, row => row.source);
+  for (const source of new Set(sources)) {
+    console.log(`SOURCE ${source} ${perSource.get(source) ?? 0} candidates ${keptBySource.get(source)?.length ?? 0} kept`);
+  }
   console.log(`${kept.length} new posting(s)${gated ? ` with stated pay above $${CONFIG.discovery.minHourly}/hr (of ${found.length} candidates)` : ''}${dryRun ? ' (dry run, queue unchanged)' : ` queued in ${queuePath}`}`);
   if (!dryRun) writeQueue([...queue, ...kept], queuePath);
   process.exit(0);

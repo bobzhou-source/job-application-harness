@@ -33,10 +33,17 @@
       "shortTermStartMonth": "Jan",
       "shortTermEndMonths": ["Jan", "Feb"]
     },
-    "sources": ["handshake"],
+    "sources": ["handshake", "levelsfyi", "quantlists"],
     "minHourly": 0,
     "fx": { "GBP": 1.33, "EUR": 1.16, "CAD": 0.72 },
-    "lists": ["https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/README.md"],
+    "lists": [
+      "https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/README.md",
+      "https://raw.githubusercontent.com/speedyapply/2027-SWE-College-Jobs/main/README.md",
+      "https://raw.githubusercontent.com/Chieler/Summer-2027-SWE-Internships/main/README.md",
+      "https://raw.githubusercontent.com/sndsh404/summer-2027-internships/main/README.md",
+      "https://zshah101.github.io/Automated-List-Of-Summer-2027-and-Fall-2026-Tech-Internships/api/jobs.json",
+      "https://raw.githubusercontent.com/aprameyak/2027-tech-jobs/main/listings.json"
+    ],
     "boards": { "greenhouse": [], "lever": [], "ashby": [] },
     "linkedin": { "queries": ["software engineer intern summer 2027"], "locations": ["United States"], "pages": 2 },
     "freehire": { "queries": ["software engineer intern 2027"], "postedWithinDays": 90, "pages": 2 },
