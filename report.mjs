@@ -9,6 +9,7 @@
 // Cost views (lib/report/costs.mjs): `--days` per-day API spend and per-submit price next to the subscription calls'
 // size and list-price equivalent; `--purposes` the same per role and purpose from the selected runs' traces;
 // `--billing` the providers' own counters and balances against the metered spend (snapshots in runs/billing.jsonl).
+// `--subscription` real subscription tokens/cache/list $ per day and purpose, per-submit equivalent, and overhead.
 // Answer views read the answer ledger (lib/report/ledger.mjs: every answer every run committed, indexed from the
 // traces into runs/answers-ledger.jsonl; new traces are indexed on each call, `--index --rebuild` starts over):
 // `--quality [--all]` the graded drafts the submitted runs shipped and a tally of the options they committed;
@@ -20,7 +21,7 @@
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './lib/config.mjs';
-import { days, purposes, billing } from './lib/report/costs.mjs';
+import { days, purposes, subscription, billing } from './lib/report/costs.mjs';
 import { quality } from './lib/report/quality.mjs';
 import { updateLedger } from './lib/report/ledger.mjs';
 import { provenance, suspects, siteAnswers } from './lib/report/audit.mjs';
@@ -69,6 +70,7 @@ if (args.includes('--apps')) {
 }
 if (args.includes('--days')) { await days(rows); process.exit(0); }
 if (args.includes('--purposes')) { await purposes(rows); process.exit(0); }
+if (args.includes('--subscription')) { await subscription(rows); process.exit(0); }
 if (args.includes('--billing')) { await billing(allRows); process.exit(0); }
 const ledgerViews = ['--quality', '--suspects', '--answer', '--site-answers', '--index'];
 if (ledgerViews.some(flag => args.includes(flag))) {
