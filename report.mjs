@@ -6,9 +6,24 @@
 // together) with lane, title, latest status, the employer's latest reply (runs/mail.json, written by `bun mail.mjs`),
 // stop category, who must act next, attempts, time, cost, and the resume and documents it went out with; written to
 // runs/applications.csv and summarized by category.
+// Cost views (lib/report/costs.mjs): `--days` per-day API spend and per-submit price next to the subscription calls'
+// size and list-price equivalent; `--purposes` the same per role and purpose from the selected runs' traces;
+// `--billing` the providers' own counters and balances against the metered spend (snapshots in runs/billing.jsonl).
+// Answer views read the answer ledger (lib/report/ledger.mjs: every answer every run committed, indexed from the
+// traces into runs/answers-ledger.jsonl; new traces are indexed on each call, `--index --rebuild` starts over):
+// `--quality [--all]` the graded drafts the submitted runs shipped and a tally of the options they committed;
+// `--suspects [--all]` the committed answers the deterministic rules flag (writer picks, site answers replayed on
+// another title, options matching no stored answer or alias, thin drafts); `--answer <text>` the provenance of any
+// label, value, or key: every run that committed, filled, stored, or drafted it, then where it lives in the stores;
+// `--site-answers [--annotate]` written[site] entries with the posting each was composed for (--annotate pins the
+// legacy ones). `--since`/`--last` select the runs for every view but --billing and --answer.
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './lib/config.mjs';
+import { days, purposes, billing } from './lib/report/costs.mjs';
+import { quality } from './lib/report/quality.mjs';
+import { updateLedger } from './lib/report/ledger.mjs';
+import { provenance, suspects, siteAnswers } from './lib/report/audit.mjs';
 
 const args = process.argv.slice(2);
 const arg = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
@@ -31,6 +46,8 @@ try {
   rows = readFileSync(fileURLToPath(new URL('./runs/summary.jsonl', import.meta.url)), 'utf8')
     .split('\n').filter(Boolean).map(line => { try { return JSON.parse(line); } catch { return null; } }).filter(Boolean);
 } catch { /* no runs yet */ }
+// Billing compares the providers' calendar counters with the whole ledger, whatever --since/--last select.
+const allRows = rows;
 if (since) rows = rows.filter(row => row.t >= since);
 if (last > 0) rows = rows.slice(-last);
 if (!rows.length) {
@@ -48,6 +65,22 @@ const ROLES = { jev: 'driver', deepseek: 'planner', writer: 'writer' };
 
 if (args.includes('--apps')) {
   applications(rows);
+  process.exit(0);
+}
+if (args.includes('--days')) { await days(rows); process.exit(0); }
+if (args.includes('--purposes')) { await purposes(rows); process.exit(0); }
+if (args.includes('--billing')) { await billing(allRows); process.exit(0); }
+const ledgerViews = ['--quality', '--suspects', '--answer', '--site-answers', '--index'];
+if (ledgerViews.some(flag => args.includes(flag))) {
+  const all = args.includes('--all');
+  const { rows: ledger, added, indexed } = updateLedger(allRows, { rebuild: args.includes('--rebuild') });
+  if (added || args.includes('--index')) console.log(`answer ledger: ${indexed} runs indexed (${added} new), ${ledger.length} rows in runs/answers-ledger.jsonl\n`);
+  const selected = new Set(rows.map(row => row.trace));
+  const chosen = ledger.filter(row => selected.has(row.run));
+  if (args.includes('--quality')) quality(chosen, { all });
+  else if (args.includes('--suspects')) suspects(chosen, { all });
+  else if (args.includes('--answer')) provenance(ledger, arg('--answer') ?? '', { all });
+  else if (args.includes('--site-answers')) siteAnswers(ledger, { annotate: args.includes('--annotate') });
   process.exit(0);
 }
 

@@ -10,3 +10,5 @@ queue.tsv
 config.json
 .env
 PACKAGING.md
+.venv/
+__pycache__/

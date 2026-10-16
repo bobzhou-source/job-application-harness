@@ -79,6 +79,7 @@ Add API keys to `.env` (never commit it):
 ```dotenv
 OPENROUTER_API_KEY=
 DEEPSEEK_API_KEY=
+OPENALEX_API_KEY=   # optional, outreach.mjs: keyless OpenAlex calls share a small daily per-IP budget
 ```
 
 Fill `answers.json` with your real applicant facts, update the resume and browser paths in `config.json`, and keep all placeholders out of your local configuration. Doctor exits successfully with:
@@ -154,6 +155,25 @@ Requires `email.enabled`. A sync reads the configured inbox (read-only) and writ
 - **Outreach:** emails you sent with a resume attached (a file matching `resumes.filePattern`) are tracked as threads: `replied`, `bounced`, `auto-reply`, `waiting`, or `follow-up` once `--follow-up` days (default 7) pass since your last message.
 
 No model sees any mail. Message text and links are cached in `runs/mail.json`, so later syncs only fetch new mail.
+
+### Research-lab cold outreach
+
+```sh
+bun outreach.mjs scope "<org>" [--dept "A;B"]                     # papers per profile topic (and department) — set the filter first
+bun outreach.mjs research "<org>" [--dept "A;B"] [--institution I123] [--n 10]   # rank the org's researchers → runs/outreach/<org>/ranked.md
+bun outreach.mjs pick "<org>" <person> <email|none>                # settle an ambiguous email (only a published candidate)
+bun outreach.mjs draft "<org>" --only a,b [--note a="angle"]       # write drafts/<person>.md
+bun outreach.mjs redraft "<org>" --only a --note "steer"           # regenerate one draft
+bun outreach.mjs push "<org>" --only a,b [--dry-run]               # Gmail draft + Calendar "Send:" reminder
+bun outreach.mjs show "<org>" [person] | bun outreach.mjs list     # inspect runs
+```
+
+Requires the `outreach` config section. Every command takes `--json`. The stages stop between steps so a person can choose who to contact and read each draft.
+
+- **Scope and research:** OpenAlex resolves the org; Jev picks among close matches, and a low-confidence pick is listed under *Needs decision*. Papers are counted at the institution and all its sub-units (OpenAlex lineage, so a medical school counts as part of its university). For each profile topic, an OpenAlex relevance search on its `terms` takes the top `openalex.perTopic` recent works with abstracts (`openalex.lookbackYears`), and the results are merged without duplicates. `scope` prints only the hit counts, so you can tune `terms` or add `--dept` before anything is embedded. `--dept "Computer Science;Systems Biology"` keeps only works whose raw affiliation text names one of those departments. An author then counts only if their own affiliation names one. The merged works are embedded locally with `google/embeddinggemma-2` (float32, `lib/outreach/py`, run through `uv`; abstracts truncated to 512 tokens). Each paper's cosine to each `profileQueries` sentence is standardized per topic over the fetched set: z = (cos − topic mean) / topic SD. Raw cosines are compressed (about 0.6–0.85), and a broad topic otherwise wins nearly every paper. An author's score is the mean z of their best `ranking.topK` papers, weighted for recency, plus `piBonus` z for last or corresponding authorship. People already in `runs/outreach/contacted.jsonl`, or whose address appears in an `exclusionDirs` file, are skipped. Set `OPENALEX_API_KEY`: keyless calls share a small daily budget per IP.
+- **Email:** the only addresses used are ones published verbatim on a public source: paper affiliations (OpenAlex or Europe PMC), a public ORCID record, or a lab or faculty page found through Exa. Each address is stored with its source URL. Addresses are never constructed from name patterns. When several candidates exist, Jev picks one; if its confidence is below `decisionThreshold`, the person is listed for `pick`.
+- **Draft:** the drafter writes a short email in the `draft.minWords`–`maxWords` range. It opens on one of the person's papers, connects one fact from `resumes.factsFile`, asks for `draft.ask`, and adds `draft.fundingLine`. A separate reviewer call checks every claim against the facts and the papers. Jev chooses the resume lane.
+- **Push:** creates a Gmail **draft**, with the resume attached, plus a Calendar reminder titled `Send: <name> (<org>)`. The reminder falls on a `scheduling.days` morning inside `scheduling.window`, in the recipient's local time zone. It respects `perDay` and `gapMinutes`, counting reminders already on the calendar. Re-pushing is idempotent. Nothing is ever sent: you open Gmail at the reminder and press Send.
 
 ## Configuration reference
 
@@ -267,10 +287,12 @@ The complete schema is:
 - `filePattern`: basename containing `{lane}` exactly once.
 - `fallbackLane`: must equal one configured discovery lane name.
 - `factsFile` and `latexPreamble`: basenames resolved beneath `resumes.directory`.
+- `factsFile` entries carry `<!-- lanes=... tags=... status=... -->` tags; `bun lib/facts.mjs lint` checks them.
+- `documents.transcript` (optional): path to the applicant's unofficial transcript PDF. A form slot that asks for a transcript is filled from this file. When it is empty or unreadable, the run stops with `needs-document`. The path is never sent to a model.
 
 For a lane named `general`, the example pattern resolves to `resume_general.pdf`. Queue construction and report validation use this same pattern.
 
-When a lane variant has a LaTeX source beside it (`resume_general.tex` next to `resume_general.pdf`) and document generation is available, each run asks the writer to tailor that variant to the posting: reorder and reword bullets toward what the posting asks for, drawing history only from the variant, the other variants, and the facts file. It sells within that history: real projects are reframed in the posting's vocabulary and adjacent techniques may be claimed, but no employer, title, date, number, or whole project is invented. Keep the facts file complete; anything missing from it cannot appear. The result must keep the letterhead line, the Education section, every role heading, date, and number from the sources, and compile to one page; otherwise the run uploads the untailored variant. Tailored PDFs keep the variant's file name and are cached per posting under `resumes.directory/tailored/<hash>/`, so you can review exactly what was sent.
+When a lane variant has a LaTeX source beside it (`resume_general.tex` next to `resume_general.pdf`) and document generation is available, each run asks the writer to tailor that variant to the posting: reorder and reword bullets toward what the posting asks for, drawing history only from the variant and the facts selected for its lane and posting. The facts are chosen deterministically by `lib/facts.mjs`: only `verified` entries tagged for that lane, ranked by overlap with the posting text, within a 12,000-character budget, with no model call. It sells within that history: real projects are reframed in the posting's vocabulary and adjacent techniques may be claimed, but no employer, title, date, number, or whole project is invented. Keep the facts file complete and tagged; anything not selected from it cannot appear. The result must keep the first line (the `\namehead` line) exactly as in the variant, the Education section, every role heading, date, and number from the sources, and compile to one page; otherwise the run uploads the untailored variant. Tailored PDFs keep the variant's file name and are cached per posting under `resumes.directory/tailored/<hash>/`, so you can review exactly what was sent.
 
 ### Discovery
 
@@ -281,8 +303,14 @@ When a lane variant has a LaTeX source beside it (`resume_general.tex` next to `
 - `lanes`: ordered lane names and title patterns; the first matching lane wins.
 - `specialLane`: an employer pattern checked before title lanes.
 - `season`: primary start months plus an optional short-term start/end window.
-- `sources` (optional, default `["handshake"]`): `handshake` searches the configured Handshake site; `listings` reads a public internship listings feed and queues the employer's own posting URLs.
-- `listings` (required with the `listings` source): `url` of a JSON array in the SimplifyJobs `listings.json` format (`company_name`, `title`, `url`, `active`, `is_visible`, `terms`, `locations`, optional `degrees`), the `terms` to accept (`["Summer 2027"]`), and a `locationPattern` regular expression one listed location must match. Listings are queued newest first; postings an earlier Handshake run already applied through are skipped.
+- `sources` (optional, default `["handshake"]`): `handshake` searches the configured Handshake site; `listings` reads a public internship listings feed; `lists` reads markdown internship lists; `boards` reads Greenhouse/Lever/Ashby job boards; `linkedin` uses LinkedIn's public guest job search; `freehire` uses the freehire.me aggregator. Every source except `handshake` queues the employer's own posting URL (LinkedIn Easy Apply postings, which have none, are skipped). Each source contributes at most its own share of candidates, so an early source cannot crowd out later ones.
+- `listings` (required with the `listings` source): `url` of a JSON array in the SimplifyJobs `listings.json` format (`company_name`, `title`, `url`, `active`, `is_visible`, `terms`, `locations`, optional `degrees`), the `terms` to accept (`["Summer 2027"]`), and a `locationPattern` regular expression one listed location must match (empty: any location). Listings are queued newest first; postings an earlier Handshake run already applied through are skipped.
+- `lists`: raw markdown URLs (e.g. GitHub README internship tables). Rows marked closed (🔒) are skipped; a "↳" row continues the company above it.
+- `boards`: `{ "greenhouse": [slug], "lever": [slug], "ashby": [slug] }`; intern-titled postings only.
+- `linkedin`: `{ "queries": [...], "locations": [...], "pages": 2 }`; entry-level postings, newest first, resolved to the employer's apply URL.
+- `freehire`: `{ "queries": [...], "postedWithinDays": 90, "pages": 2 }`; intern-seniority postings worldwide, no API key.
+- `minHourly` (optional, default 0 = off): queue a posting only when its own posting states pay above this many USD per hour (a range counts at its floor; yearly/monthly/weekly figures are converted; bonuses, housing, and relocation are ignored). Pay is read from the Greenhouse/Lever/Ashby/Workday APIs or the page text, and appended to the queue name. Postings without stated pay are dropped and logged.
+- `fx` (optional): USD value of one unit of each foreign currency the pay gate should accept, e.g. `{ "GBP": 1.33, "EUR": 1.16 }`. Pay in a currency without a rate is ignored.
 
 Lane names must be unique, nonempty, and safe for both `queue.tsv` and filename substitution. All configured regular expressions must compile.
 
@@ -302,6 +330,7 @@ The public configuration uses OpenRouter for writer and fallback. `omp` is never
 - `coverLetterHeading`: optional local letterhead text.
 - `relocateAnywhere` and `workInPerson`: factual preferences included only when true.
 - `summerAvailability`: included only when nonempty.
+- `dateOfBirth` (optional): `YYYY-MM-DD`. Stored as the `date_of_birth` answer, so a birth-date field is filled from it. When empty, a birth-date field stops the run with `needs-dob`.
 
 False or empty values mean “do not make this claim”; they are not converted to a negative claim. `displayName` and `coverLetterHeading` must be appropriate when document generation is used.
 
@@ -312,6 +341,17 @@ False or empty values mean “do not make this claim”; they are not converted 
 - `notifications.backend`: `console` or macOS-only `macos-osascript`; `title` and `sound` configure notifications.
 - `queue.runTimeoutSeconds`: per-application timeout; default `900`.
 - `runtime.debug`: enables debug output.
+- `outreach` (optional; `outreach.mjs` only):
+  - `gmail`: `{clientModule, account}`, the local Gmail client module that creates drafts.
+  - `calendar`: `{bridgeApp, calendarId, alarmMinutes}`, the CalendarBridge app and target calendar.
+  - `profileQueries`: `[{id, label, query, terms, resumeLane}]`. `query` is an abstract-style sentence describing your work, used for embedding similarity. `terms` is a short keyword phrase for the OpenAlex search, defaulting to `label`. The best-matching query picks a default resume lane.
+  - `draft`: `{signoff, ask, fundingLine, minWords, maxWords}`.
+  - `openalex`: `{mailto, lookbackYears, perTopic}`.
+  - `ranking`: `{n, minWorks, topK, recencyHalfLifeYears, piBonus}`.
+  - `scheduling`: `{days, window, perDay, gapMinutes}`.
+  - `decisionThreshold`: default `0.6`.
+  - `exclusionDirs`: earlier outreach folders whose addresses are skipped.
+  - `backends`: `drafter`, `reviewer` and `light`, each `{backend: "omp", model, thinking, maxTime}` or `{backend: "deepseek", model, endpoint, apiKeyEnv}`.
 
 API keys are the only environment configuration. All other settings belong in `config.json`.
 

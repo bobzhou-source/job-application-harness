@@ -1,12 +1,16 @@
-// discover.mjs — find new Handshake postings and append them to queue.tsv (url<TAB>lane<TAB>name) for queue.mjs.
-// Sources: job postings the user left open in the automation Chrome (each is queued, then its tab closes), and
-// Handshake job searches (one reused tab, closed at the end). Postings any earlier run submitted, found closed or
-// already applied, or tried twice are never queued again (runs/summary.jsonl is the record).
+// discover.mjs — find new internship postings and append them to queue.tsv (url<TAB>lane<TAB>name) for queue.mjs.
+// Sources (discovery.sources): Handshake searches, the SimplifyJobs listings feed, ATS boards (Greenhouse/Lever/Ashby
+// APIs), markdown internship lists (GitHub READMEs), LinkedIn's guest job search (resolved to employer URLs), and the
+// freehire.me aggregator.
+// With discovery.minHourly set, a posting is queued only when its own page states pay above it. Postings any earlier
+// run submitted, found closed or already applied, or tried twice are never queued again (runs/summary.jsonl).
 //   bun discover.mjs [--query "software engineer intern"]... [--pages N] [--max N] [--dry-run]
+//   bun discover.mjs --workday [--max N] [--dry-run]   (Workday tenants seen in runs/, appended to runs/workday-queue.tsv)
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as browser from './lib/browser.mjs';
 import { loadConfig } from './lib/config.mjs';
+import { postingDetails, boardPostings, markdownPostings, linkedinPostings, freehirePostings, workdayPostings } from './lib/discover/sources.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 export const QUEUE_FILE = `${HERE}queue.tsv`;
@@ -27,7 +31,11 @@ function compile(pattern, field) {
 }
 
 const RELEVANT = compile(CONFIG.discovery.includeTitlePattern, 'includeTitlePattern');
-const UNFIT = compile(CONFIG.discovery.excludeTitlePattern, 'excludeTitlePattern');
+// Postings closed to outside applicants by their title ("Returning Toll Technology Intern (For Current/Former HNTB
+// Interns Only)", "Internal Candidates Only") are unfit for everyone discovery serves, whatever the configured pattern.
+const RESTRICTED_TITLE = /\breturning\b|\b(current|former|previous|existing|past)\b[^)]{0,40}\b(interns?|employees?|students?|staff|members?)\s+only\b|\b(internal|employees?|interns?) only\b|\brehires?\b/i;
+const CONFIGURED_UNFIT = compile(CONFIG.discovery.excludeTitlePattern, 'excludeTitlePattern');
+const UNFIT = { test: title => RESTRICTED_TITLE.test(title) || CONFIGURED_UNFIT.test(title) };
 const EXCLUDED_EMPLOYER = CONFIG.discovery.excludeEmployerPattern ? compile(CONFIG.discovery.excludeEmployerPattern, 'excludeEmployerPattern') : null;
 
 // Resume variant by the role's title (first match wins); the configured special employer lane wins over titles.
@@ -53,10 +61,17 @@ function inSeason(meta) {
 export function jobId(url) {
   return String(url).match(JOB_ID)?.[1] ?? null;
 }
-// A posting's identity across runs: its Handshake id, else its URL without scheme, query, fragment, or an
-// /apply… suffix (an employer's posting and its application form are one posting).
+// A posting's identity across runs: its Handshake id; a Workday posting's tenant and requisition (one requisition is
+// linked under several site paths, each copy with its own "-1"/"-2" suffix; ids read JR2603638, R39407, JR-2604434,
+// R26-5374 or 10079130-WD); else its URL without scheme, query, fragment, or an /apply… suffix (an employer's
+// posting and its application form are one posting).
 export function jobKey(url) {
-  return jobId(url) ?? (url ? String(url).replace(/^https?:\/\//i, '').replace(/[?#].*$/, '').replace(/\/apply(\/.*)?$/i, '').replace(/\/+$/, '').toLowerCase() : null);
+  const handshake = jobId(url);
+  if (handshake) return handshake;
+  if (!url) return null;
+  const workday = String(url).match(/^https?:\/\/([^./]+)\.wd\d+\.myworkday(?:jobs|site)\.com\/.*_((?=[A-Za-z]*-?\d)[A-Za-z0-9-]+?)(?:-\d{1,2})?(?:[/?#]|$)/i);
+  if (workday) return `workday:${workday[1]}:${workday[2]}`.toLowerCase();
+  return String(url).replace(/^https?:\/\//i, '').replace(/[?#].*$/, '').replace(/\/apply(\/.*)?$/i, '').replace(/\/+$/, '').toLowerCase();
 }
 
 // Per posting, from every recorded run: done (submitted, closed, or already applied) and how many runs stopped.
@@ -71,15 +86,18 @@ export function jobHistory() {
     let row; try { row = JSON.parse(line); } catch { continue; }
     const key = jobKey(row.job);
     if (!key) continue;
-    const entry = runs.get(key) ?? { stopped: 0, done: false, submitted: false };
+    const entry = runs.get(key) ?? { stopped: 0, done: false, submitted: false, terminal: false };
     if (row.outcome === 'submitted') entry.submitted = true;
-    if (row.outcome === 'submitted' || TERMINAL.test(row.reason ?? '') || USER_WAIT.test(row.reason ?? '')) entry.done = true;
+    // terminal: submitted, closed, or already applied — never worth another run. done also covers a stop waiting on
+    // the user (a field or document the run could not settle), which a later harness fix may clear (queue --retry).
+    if (row.outcome === 'submitted' || TERMINAL.test(row.reason ?? '')) entry.terminal = true;
+    if (entry.terminal || USER_WAIT.test(row.reason ?? '')) entry.done = true;
     else entry.stopped += 1;
     runs.set(key, entry);
     // The employer posting a Handshake run applied through is the same posting when a listings feed links to it.
     const employerKey = row.employerPosting && jobKey(row.employerPosting);
     if (employerKey && employerKey !== key && entry.done) {
-      runs.set(employerKey, { stopped: runs.get(employerKey)?.stopped ?? 0, done: true, submitted: entry.submitted || !!runs.get(employerKey)?.submitted });
+      runs.set(employerKey, { stopped: runs.get(employerKey)?.stopped ?? 0, done: true, submitted: entry.submitted || !!runs.get(employerKey)?.submitted, terminal: entry.terminal || !!runs.get(employerKey)?.terminal });
     }
   }
   return runs;
@@ -89,15 +107,15 @@ function spentJobs() {
   return new Set([...jobHistory()].filter(([, entry]) => entry.done || entry.stopped >= 2).map(([key]) => key));
 }
 
-export function readQueue() {
-  if (!existsSync(QUEUE_FILE)) return [];
-  return readFileSync(QUEUE_FILE, 'utf8').split('\n').filter(line => line.trim()).map(line => {
+export function readQueue(path = QUEUE_FILE) {
+  if (!existsSync(path)) return [];
+  return readFileSync(path, 'utf8').split('\n').filter(line => line.trim()).map(line => {
     const [url, lane, name] = line.split('\t');
     return { url, lane, name };
   });
 }
-export function writeQueue(rows) {
-  writeFileSync(QUEUE_FILE, rows.map(row => `${row.url}\t${row.lane}\t${row.name}\n`).join(''));
+export function writeQueue(rows, path = QUEUE_FILE) {
+  writeFileSync(path, rows.map(row => `${row.url}\t${row.lane}\t${row.name}\n`).join(''));
 }
 
 async function main() {
@@ -107,28 +125,106 @@ async function main() {
   const pages = Number(values('--pages')[0] ?? 2);
   const max = Number(values('--max')[0] ?? 40);
   const dryRun = args.includes('--dry-run');
+  const queuePath = values('--queue')[0] ?? QUEUE_FILE;
+  if (args.includes('--workday')) return workdayDiscovery({ max: Number(values('--max')[0] ?? 60), dryRun });
 
   const spent = spentJobs();
-  const queue = readQueue();
+  const queue = readQueue(queuePath);
   const queued = new Set(queue.map(row => jobKey(row.url)).filter(Boolean));
   const found = [];
-  const take = (key, lane, name, source, url = `${HANDSHAKE}/jobs/${key}`) => {
-    if (!key || spent.has(key) || queued.has(key) || found.length >= max) return;
+  // Candidates are gathered past max when pay is gated (many fail the gate), with a cap per source so the first
+  // source cannot crowd out the rest.
+  const gated = CONFIG.discovery.minHourly > 0;
+  const limit = gated ? max * 8 : max;
+  const perSource = new Map();
+  const full = source => (perSource.get(source) ?? 0) >= limit;
+  const take = (key, lane, name, source, url = `${HANDSHAKE}/jobs/${key}`, extra = {}) => {
+    if (!key || spent.has(key) || queued.has(key) || full(source)) return;
     queued.add(key);
-    found.push({ url, lane, name: name.replace(/\s+/g, ' ').replace(/\t/g, ' ').trim().slice(0, 90), source });
+    perSource.set(source, (perSource.get(source) ?? 0) + 1);
+    found.push({ url, lane, name: name.replace(/\s+/g, ' ').replace(/\t/g, ' ').trim().slice(0, 90), source, ...extra });
   };
   const fits = (title, employer) => RELEVANT.test(title) && !UNFIT.test(title) && !(EXCLUDED_EMPLOYER && EXCLUDED_EMPLOYER.test(employer));
+  // Feeds of employer postings share one shape: { url, title, company, location, pay? } (pay when the feed carries
+  // the text). A stated location must match discovery.listings.locationPattern when one is set.
+  const locationPattern = CONFIG.discovery.listings?.locationPattern;
+  const located = locationPattern ? new RegExp(locationPattern, 'i') : null;
+  const takeAll = (postings, source) => {
+    for (const posting of postings) {
+      if (full(source)) break;
+      if (!fits(posting.title, posting.company) || /\b(fall|spring|winter)\b|2026\b/i.test(posting.title)) continue;
+      if (located && posting.location && !posting.location.split(/\s*[;|•]\s*|\s+or\s+/i).some(place => located.test(place))) continue;
+      take(jobKey(posting.url), laneFor(posting.title, posting.company), `${posting.company} — ${posting.title}`, source, posting.url,
+        { pay: posting.pay, text: posting.text, location: posting.location });
+    }
+  };
+  const { sources } = CONFIG.discovery;
 
-  if (CONFIG.discovery.sources.includes('listings')) await fromListings({ take, fits, max, found });
-  if (CONFIG.discovery.sources.includes('handshake') && found.length < max) {
-    await fromHandshake({ take, fits, spent, queued, queries, pages, max, found, dryRun });
+  if (sources.includes('listings')) await fromListings({ take, fits, max: limit, found });
+  if (sources.includes('lists')) takeAll(await markdownPostings(CONFIG.discovery.lists), 'lists');
+  if (sources.includes('boards')) takeAll(await boardPostings(CONFIG.discovery.boards), 'boards');
+  if (sources.includes('freehire')) takeAll(await freehirePostings(CONFIG.discovery.freehire, CONFIG.discovery.fx), 'freehire');
+  if (sources.includes('linkedin')) takeAll(await linkedinPostings(CONFIG.discovery.linkedin), 'linkedin');
+  if (sources.includes('handshake') && found.length < limit) {
+    await fromHandshake({ take, fits, spent, queued, queries, pages, max: limit, found, dryRun });
   }
 
-  for (const row of found) console.log(`${row.lane}\t${row.name}\t${row.url}\t(${row.source})`);
-  console.log(`${found.length} new posting(s)${dryRun ? ' (dry run, queue unchanged)' : ` queued in ${QUEUE_FILE}`}`);
-  if (!dryRun) writeQueue([...queue, ...found]);
+  // The pay gate stops at max: alternate sources so every source gets its turn at the queue.
+  const bySource = Map.groupBy(found, row => row.source);
+  const mixed = Array.from({ length: Math.max(0, ...[...bySource.values()].map(rows => rows.length)) }, (_, i) => [...bySource.values()].map(rows => rows[i]).filter(Boolean)).flat();
+  const kept = gated ? await payGate(mixed, max) : found;
+  for (const row of kept) console.log(`${row.lane}\t${row.name}\t${row.url}\t(${row.source})`);
+  console.log(`${kept.length} new posting(s)${gated ? ` with stated pay above $${CONFIG.discovery.minHourly}/hr (of ${found.length} candidates)` : ''}${dryRun ? ' (dry run, queue unchanged)' : ` queued in ${queuePath}`}`);
+  if (!dryRun) writeQueue([...queue, ...kept], queuePath);
   process.exit(0);
 }
+
+// Workday postings for every tenant seen in local runs, filtered and deduped like the other sources, appended to
+// runs/workday-queue.tsv (not queue.tsv: the Workday queue runs separately).
+async function workdayDiscovery({ max, dryRun }) {
+  const file = `${HERE}runs/workday-queue.tsv`;
+  const prior = existsSync(file) ? readFileSync(file, 'utf8') : '';
+  const priorRows = [...readQueue(), ...prior.split('\n').filter(Boolean).map(line => ({ url: line.split('\t')[0] }))];
+  const { rows, seen, abroad, tenants, faceted } = await workdayPostings({
+    root: HERE, max, includeTitlePattern: RELEVANT, excludeTitlePattern: UNFIT, excludeEmployerPattern: EXCLUDED_EMPLOYER,
+    spent: spentJobs(), queued: new Set(priorRows.map(row => jobKey(row.url)).filter(Boolean)), keyFor: jobKey, laneFor,
+  });
+  if (!dryRun && rows.length) {
+    writeFileSync(file, prior + (prior && !prior.endsWith('\n') ? '\n' : '') + rows.map(row => `${row.url}\t${row.lane}\t${row.name}\n`).join(''));
+  }
+  console.log(`WORKDAY_DISCOVERED ${rows.length} new of ${seen} (tenants ${tenants}, US country facet ${faceted}, ${abroad} dropped by their record's country)${dryRun ? ' [dry run, not written]' : ''}`);
+}
+
+// Rows whose employer posting states pay above discovery.minHourly (USD/hr, at the converted range floor), up to
+// max. postingDetails normalizes pay periods and duration-qualified stipends before this strict > comparison;
+// no readable pay, or pay at or under the bar, is dropped (logged). The hourly floor is appended to the queue name.
+async function payGate(rows, max) {
+  const kept = [];
+  let next = 0;
+  const worker = async () => {
+    while (next < rows.length && kept.length < max) {
+      const row = rows[next++];
+      // A feed's own posting text with stated pay is the employer's posting; otherwise read the employer page.
+      const details = row.pay ? { pay: row.pay, text: row.text, location: row.location } : await postingDetails(row.url, CONFIG.discovery.fx).catch(error => ({ error }));
+      const pay = details?.pay;
+      const location = details?.location || row.location || '';
+      // Abroad, a posting that wants an existing local right to work (or offers no visa) is closed to the applicant.
+      const abroad = ABROAD.test(location);
+      const localOnly = abroad && LOCAL_WORK_RIGHT.test(details?.text ?? '');
+      if (pay && pay.hourly > CONFIG.discovery.minHourly && !localOnly) {
+        if (kept.length < max) kept.push({ url: row.url, lane: row.lane, source: row.source, name: `${row.name}${abroad ? ` [${location.slice(0, 30)}]` : ''} ($${pay.hourly}/hr)`.slice(0, 120) });
+      } else {
+        console.error(`skip ${row.name}: ${localOnly ? `needs local work rights (${location})` : details?.error ? `unreadable (${details.error.message})` : pay ? `pay $${pay.hourly}/hr (${pay.evidence})` : 'no stated pay'}`);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  return kept;
+}
+
+// A location naming a place outside the US (US locations are too varied to list: "NYC - 1211 Ave", "Morrisville").
+const ABROAD = /\b(canada|toronto|vancouver|montr[eé]al|ottawa|waterloo|calgary|british columbia|ontario|qu[eé]bec|uk|united kingdom|england|scotland|london|cambridge, (uk|united kingdom|england)|oxford, uk|manchester|edinburgh|leeds|ireland|dublin|germany|berlin|munich|frankfurt|france|paris|netherlands|amsterdam|belgium|switzerland|z[uü]rich|geneva|austria|vienna|spain|madrid|barcelona|portugal|lisbon|italy|milan|sweden|stockholm|denmark|copenhagen|norway|finland|poland|warsaw|czech|prague|israel|tel aviv|singapore|hong kong|japan|tokyo|korea|seoul|china|shanghai|beijing|taiwan|taipei|india|bangalore|bengaluru|hyderabad|mumbai|australia|sydney|melbourne|new zealand|mexico|brazil|s[aã]o paulo|uae|dubai|emea|apac)\b/i;
+const LOCAL_WORK_RIGHT = /right to work in|(eligible|authori[sz]ed|permitted|entitled) to work in (?!the (us|u\.s\.|united states))|(existing|valid|current) (work|working) (permit|visa|rights?)|work permit (is )?required|(unable|not able|cannot|can't|do not|don't|will not|won't) (to )?(offer|provide|support|sponsor)\w* (any )?(visa|sponsorship|work permit)|no (visa )?sponsorship|citizens? or permanent residents? (of|in) (?!the (us|united states))/i;
 
 // A public listings feed: open postings in a configured term and location, newest first, linking straight to the
 // employer's own application.
@@ -137,10 +233,10 @@ async function fromListings({ take, fits, max, found }) {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`listings feed ${url} answered HTTP ${response.status}`);
   const listings = await response.json();
-  const located = new RegExp(locationPattern, 'i');
+  const located = locationPattern ? new RegExp(locationPattern, 'i') : null;
   const open = listings.filter(listing => listing.active && listing.is_visible !== false && typeof listing.url === 'string'
     && /^https:/.test(listing.url) && (listing.terms ?? []).some(term => terms.includes(term))
-    && (listing.locations ?? []).some(location => located.test(location))
+    && (!located || (listing.locations ?? []).some(location => located.test(location)))
     && (!Array.isArray(listing.degrees) || !listing.degrees.length || listing.degrees.some(degree => /bachelor/i.test(degree)))
     && fits(String(listing.title ?? ''), String(listing.company_name ?? '')));
   open.sort((a, b) => (b.date_posted ?? 0) - (a.date_posted ?? 0));

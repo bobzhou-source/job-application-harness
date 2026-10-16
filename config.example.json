@@ -13,6 +13,9 @@
     "factsFile": "MASTER-FACTS.md",
     "latexPreamble": "_preamble.tex"
   },
+  "documents": {
+    "transcript": ""
+  },
   "discovery": {
     "handshakeBaseUrl": "https://your-school.joinhandshake.com",
     "queries": ["software engineer intern"],
@@ -31,6 +34,12 @@
       "shortTermEndMonths": ["Jan", "Feb"]
     },
     "sources": ["handshake"],
+    "minHourly": 0,
+    "fx": { "GBP": 1.33, "EUR": 1.16, "CAD": 0.72 },
+    "lists": ["https://raw.githubusercontent.com/vanshb03/Summer2027-Internships/dev/README.md"],
+    "boards": { "greenhouse": [], "lever": [], "ashby": [] },
+    "linkedin": { "queries": ["software engineer intern summer 2027"], "locations": ["United States"], "pages": 2 },
+    "freehire": { "queries": ["software engineer intern 2027"], "postedWithinDays": 90, "pages": 2 },
     "listings": {
       "url": "https://raw.githubusercontent.com/SimplifyJobs/Summer2027-Internships/dev/.github/scripts/listings.json",
       "terms": ["Summer 2027"],
@@ -68,7 +77,9 @@
     "coverLetterHeading": "",
     "relocateAnywhere": false,
     "workInPerson": false,
-    "summerAvailability": ""
+    "summerAvailability": "",
+    "dateOfBirth": "",
+    "workAuthorizedCountries": ["United States"]
   },
   "email": {
     "enabled": false,
@@ -91,5 +102,59 @@
   },
   "runtime": {
     "debug": false
+  },
+  "outreach": {
+    "gmail": {
+      "clientModule": "~/path/to/multi-gmail-mcp/local/src/gmail-client.js",
+      "account": "you@example.edu"
+    },
+    "calendar": {
+      "bridgeApp": "~/path/to/CalendarBridge.app",
+      "calendarId": "CALENDAR-UUID",
+      "alarmMinutes": 10
+    },
+    "profileQueries": [
+      {
+        "id": "example-topic",
+        "label": "Example research topic",
+        "query": "one sentence describing work you have done and want to do, in paper-abstract language",
+        "terms": "short keyword search phrase",
+        "resumeLane": "swe"
+      }
+    ],
+    "draft": {
+      "signoff": "Best,\nYour Name\nYour College",
+      "ask": "a 15-minute call about a research position, in person for Jan Plan 2027 or Summer 2027",
+      "fundingLine": "",
+      "minWords": 120,
+      "maxWords": 180
+    },
+    "openalex": {
+      "mailto": "you@example.edu",
+      "lookbackYears": 3,
+      "perTopic": 100
+    },
+    "ranking": {
+      "n": 10,
+      "minWorks": 2,
+      "topK": 3,
+      "recencyHalfLifeYears": 1.5,
+      "piBonus": 0.25
+    },
+    "scheduling": {
+      "days": [
+        "Tue",
+        "Wed",
+        "Thu"
+      ],
+      "window": [
+        "09:00",
+        "10:30"
+      ],
+      "perDay": 3,
+      "gapMinutes": 15
+    },
+    "decisionThreshold": 0.6,
+    "exclusionDirs": []
   }
 }

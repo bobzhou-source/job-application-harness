@@ -28,10 +28,11 @@ const email = await import('./lib/email.mjs');
 const { drive, pickOption, plan: jevPlan } = await import('./lib/jev.mjs');
 const { coverLetter, coverLetterText, instructedDocument, tailoredResume } = await import('./lib/coverletter.mjs');
 const answers = await import('./lib/answers.mjs');
+const { withFileLockSync } = await import('./lib/lockfile.mjs');
 const credentials = await import('./lib/credentials.mjs');
 const runlog = await import('./lib/trace.mjs');
 const { Stop } = await import('./lib/apply/stop.mjs');
-const { isConfirmed } = await import('./lib/apply/confirm.mjs');
+const { isConfirmed, evidenceOf } = await import('./lib/apply/confirm.mjs');
 const { createState } = await import('./lib/apply/state.mjs');
 const { createRuntime } = await import('./lib/apply/runtime.mjs');
 const { installObserver } = await import('./lib/apply/observer.mjs');
@@ -43,6 +44,7 @@ const { installPick } = await import('./lib/apply/pick.mjs');
 const { installPicker } = await import('./lib/apply/picker.mjs');
 const { installPass } = await import('./lib/apply/pass.mjs');
 const { installSession } = await import('./lib/apply/session.mjs');
+const { installTemplate } = await import('./lib/apply/template.mjs');
 
 // Non-secret machine and user settings (config.json), read once at startup. A missing or invalid config fails here
 // with the loader's actionable message, before any run state exists.
@@ -82,8 +84,13 @@ async function options(argv) {
   }
   const data = answers.load(answerPath);
   if (qa.length) {
+    // Merge into the latest answers.json under the lock: parallel workers share the file.
+    withFileLockSync(answerPath, () => {
+      const stored = answers.load(answerPath);
+      stored.qa = { ...stored.qa, ...Object.fromEntries(qa) };
+      answers.save(answerPath, stored);
+    });
     data.qa = { ...data.qa, ...Object.fromEntries(qa) };
-    answers.save(answerPath, data);
   }
   // The explicit override is deliberately applied only after persistent Q&A storage.
   if (resume) data.facts = { ...data.facts, resume };
@@ -94,9 +101,9 @@ async function options(argv) {
 // run-loop state (one ctx object) is handed to the moved helpers explicitly instead of through module globals.
 async function run() {
   const ctx = createState({ answerPath });
-  const shared = { ...createRuntime({ config, runlog, Stop }), config, options, isConfirmed };
+  const shared = { ...createRuntime({ config, runlog, Stop }), config, options, isConfirmed, evidenceOf };
   for (const install of [installObserver, installAccounts, installEmailcode, installWriter, installSteprules,
-    installPick, installPicker, installPass, installSession]) {
+    installPick, installPicker, installPass, installSession, installTemplate]) {
     Object.assign(shared, install(ctx, shared));
   }
   await shared.runFlow(ctx);
