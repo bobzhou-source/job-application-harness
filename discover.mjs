@@ -13,6 +13,7 @@ import * as browser from './lib/browser.mjs';
 import { loadConfig } from './lib/config.mjs';
 import { blockedHosts, hostOfUrl } from './lib/blocked-hosts.mjs';
 import { postingDetails, boardPostings, markdownPostings, linkedinPostings, freehirePostings, workdayPostings, levelsPostings, quantYamlPostings } from './lib/discover/sources.mjs';
+import { degreeRequirement } from './lib/eligibility.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 export const QUEUE_FILE = `${HERE}queue.tsv`;
@@ -77,7 +78,7 @@ export function jobKey(url) {
 }
 
 // Per posting, from every recorded run: done (submitted, closed, or already applied) and how many runs stopped.
-const TERMINAL = /already (applied|submitted|shows|records|been applied)|previously submitted|submitted successfully|application was submitted|applied on|not accepting|no longer|is closed|registration is closed|unable to apply|cannot be applied|not currently applicable|not open for applications|must wait|posting-unavailable|SUBMITTED earlier/i;
+const TERMINAL = /already (applied|submitted|shows|records|been applied)|previously submitted|submitted successfully|application was submitted|applied on|not accepting|no longer|is closed|registration is closed|unable to apply|cannot be applied|not currently applicable|not open for applications|must wait|posting-unavailable|SUBMITTED earlier|ineligible-degree/i;
 // A stop that waits on the user (a captcha to solve by hand, an answer, a document, a mailbox link) ends the same way
 // on every retry: the posting is the user's now and is never queued again.
 const USER_WAIT = /^(captcha-rejected|needs-user|needs-document|gate (captcha|mfa))/i;
@@ -161,7 +162,7 @@ async function main() {
       if (!fits(posting.title, posting.company) || /\b(fall|spring|winter)\b|2026\b/i.test(posting.title)) continue;
       if (located && posting.location && !posting.location.split(/\s*[;|•]\s*|\s+or\s+/i).some(place => located.test(place))) continue;
       take(jobKey(posting.url), posting.lane ?? laneFor(posting.title, posting.company), `${posting.company} — ${posting.title}`, source, posting.url,
-        { pay: posting.pay, text: posting.text, location: posting.location });
+        { pay: posting.pay, text: posting.text, location: posting.location, title: posting.title });
     }
   };
   const { sources } = CONFIG.discovery;
@@ -180,13 +181,16 @@ async function main() {
   // The pay gate stops at max: alternate sources so every source gets its turn at the queue.
   const bySource = Map.groupBy(found, row => row.source);
   const mixed = Array.from({ length: Math.max(0, ...[...bySource.values()].map(rows => rows.length)) }, (_, i) => [...bySource.values()].map(rows => rows[i]).filter(Boolean)).flat();
-  const kept = gated ? await payGate(mixed, max) : found;
+  const paid = gated ? await payGate(mixed, max) : found;
+  // After the pay gate, a posting whose title or description requires or targets graduate enrollment is dropped
+  // before it reaches the queue (the same gate runs over --workday refills below).
+  const { kept, dropped: droppedGraduate } = await degreeGate(paid);
   for (const row of kept) console.log(`${row.lane}\t${row.name}\t${row.url}\t(${row.source})`);
   const keptBySource = Map.groupBy(kept, row => row.source);
   for (const source of new Set(sources)) {
     console.log(`SOURCE ${source} ${perSource.get(source) ?? 0} candidates ${keptBySource.get(source)?.length ?? 0} kept`);
   }
-  console.log(`${kept.length} new posting(s)${gated ? ` with stated pay above $${CONFIG.discovery.minHourly}/hr (of ${found.length} candidates)` : ''}${dryRun ? ' (dry run, queue unchanged)' : ` queued in ${queuePath}`}`);
+  console.log(`${kept.length} new posting(s)${gated ? ` with stated pay above $${CONFIG.discovery.minHourly}/hr (of ${found.length} candidates)` : ''}; ${droppedGraduate} dropped (graduate-only)${dryRun ? ' (dry run, queue unchanged)' : ` queued in ${queuePath}`}`);
   if (!dryRun) writeQueue([...queue, ...kept], queuePath);
   process.exit(0);
 }
@@ -203,11 +207,38 @@ async function workdayDiscovery({ max, dryRun }) {
   });
   // The owner's brake list (runs/blocked-hosts.tsv): a blocked tenant is never put back in the Workday queue.
   const blocked = blockedHosts();
-  const kept = rows.filter(row => !blocked.has(hostOfUrl(row.url)));
+  const unblocked = rows.filter(row => !blocked.has(hostOfUrl(row.url)));
+  const { kept, dropped: droppedGraduate } = await degreeGate(unblocked);
   if (!dryRun && kept.length) {
     writeFileSync(file, prior + (prior && !prior.endsWith('\n') ? '\n' : '') + kept.map(row => `${row.url}\t${row.lane}\t${row.name}\n`).join(''));
   }
-  console.log(`WORKDAY_DISCOVERED ${kept.length} new of ${seen} (tenants ${tenants}, US country facet ${faceted}, ${abroad} dropped by their record's country, ${rows.length - kept.length} blocked-host)${dryRun ? ' [dry run, not written]' : ''}`);
+  console.log(`WORKDAY_DISCOVERED ${kept.length} new of ${seen} (tenants ${tenants}, US country facet ${faceted}, ${abroad} dropped by their record's country, ${rows.length - unblocked.length} blocked-host, ${droppedGraduate} dropped (graduate-only))${dryRun ? ' [dry run, not written]' : ''}`);
+}
+
+// Drop postings whose title or own page text requires or targets graduate enrollment. A feed row already carrying
+// text is classified from it; one without text is read through the same postingDetails() the pay gate uses. A page
+// that cannot be read, and a row with neither title nor text, is kept rather than guessed at.
+async function degreeGate(rows) {
+  const kept = [];
+  let dropped = 0;
+  let next = 0;
+  const worker = async () => {
+    while (next < rows.length) {
+      const row = rows[next++];
+      const details = row.postingText || row.text ? null : await postingDetails(row.url, CONFIG.discovery.fx).catch(() => null);
+      const title = row.title || details?.title || '';
+      const text = row.postingText || row.text || details?.text || '';
+      const verdict = degreeRequirement(`${title}\n${text}`);
+      if (verdict.hard) {
+        dropped += 1;
+        console.error(`skip ${row.name}: graduate-only (${verdict.level}: ${verdict.evidence})`);
+      } else {
+        kept.push(row);
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: 6 }, worker));
+  return { kept, dropped };
 }
 
 // Rows whose employer posting states pay above discovery.minHourly (USD/hr, at the converted range floor), up to
@@ -227,7 +258,7 @@ async function payGate(rows, max) {
       const abroad = ABROAD.test(location);
       const localOnly = abroad && LOCAL_WORK_RIGHT.test(details?.text ?? '');
       if (pay && pay.hourly > CONFIG.discovery.minHourly && !localOnly) {
-        if (kept.length < max) kept.push({ url: row.url, lane: row.lane, source: row.source, name: `${row.name}${abroad ? ` [${location.slice(0, 30)}]` : ''} ($${pay.hourly}/hr)`.slice(0, 120) });
+        if (kept.length < max) kept.push({ url: row.url, lane: row.lane, source: row.source, name: `${row.name}${abroad ? ` [${location.slice(0, 30)}]` : ''} ($${pay.hourly}/hr)`.slice(0, 120), title: details?.title || row.title || '', postingText: details?.text || row.text || '' });
       } else {
         console.error(`skip ${row.name}: ${localOnly ? `needs local work rights (${location})` : details?.error ? `unreadable (${details.error.message})` : pay ? `pay $${pay.hourly}/hr (${pay.evidence})` : 'no stated pay'}`);
       }
@@ -257,7 +288,7 @@ async function fromListings({ take, fits, max, found }) {
   open.sort((a, b) => (b.date_posted ?? 0) - (a.date_posted ?? 0));
   for (const listing of open) {
     if (found.length >= max) break;
-    take(jobKey(listing.url), laneFor(listing.title, listing.company_name), `${listing.company_name} — ${listing.title}`, 'listings', listing.url);
+    take(jobKey(listing.url), laneFor(listing.title, listing.company_name), `${listing.company_name} — ${listing.title}`, 'listings', listing.url, { title: listing.title });
   }
 }
 
@@ -272,7 +303,7 @@ async function fromHandshake({ take, fits, spent, queued, queries, pages, max, f
       if (!spent.has(id) && !queued.has(id)) {
         if (!title || /^handshake$/i.test(title)) continue; // a search-result pane without its posting loaded
         const parts = title.split(' | ');
-        take(id, laneFor(parts.slice(0, -1).join(' | ') || title, parts.at(-1) ?? ''), parts.length > 1 ? `${parts.at(-1)} — ${parts.slice(0, -1).join(' | ')}` : title, 'tab');
+        take(id, laneFor(parts.slice(0, -1).join(' | ') || title, parts.at(-1) ?? ''), parts.length > 1 ? `${parts.at(-1)} — ${parts.slice(0, -1).join(' | ')}` : title, 'tab', undefined, { title });
       }
       if (!dryRun && (spent.has(id) || queued.has(id)) && (await connection.pages()).length > 1) await page.close().catch(() => undefined);
     }
@@ -298,7 +329,7 @@ async function fromHandshake({ take, fits, spent, queued, queries, pages, max, f
           for (const card of cards) {
             if (!/\binternship\b/i.test(card.meta) || !inSeason(card.meta) || !fits(card.title, card.employer)) continue;
             if (found.length >= quota) break;
-            take(jobId(`${HANDSHAKE}${card.href}`), laneFor(card.title, card.employer), `${card.employer} — ${card.title}`, query);
+            take(jobId(`${HANDSHAKE}${card.href}`), laneFor(card.title, card.employer), `${card.employer} — ${card.title}`, query, undefined, { title: card.title });
           }
         }
       }
