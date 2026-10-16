@@ -10,6 +10,7 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as browser from './lib/browser.mjs';
 import { loadConfig } from './lib/config.mjs';
+import { blockedHosts, hostOfUrl } from './lib/blocked-hosts.mjs';
 import { postingDetails, boardPostings, markdownPostings, linkedinPostings, freehirePostings, workdayPostings } from './lib/discover/sources.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
@@ -129,6 +130,7 @@ async function main() {
   if (args.includes('--workday')) return workdayDiscovery({ max: Number(values('--max')[0] ?? 60), dryRun });
 
   const spent = spentJobs();
+  const blocked = blockedHosts();
   const queue = readQueue(queuePath);
   const queued = new Set(queue.map(row => jobKey(row.url)).filter(Boolean));
   const found = [];
@@ -140,6 +142,9 @@ async function main() {
   const full = source => (perSource.get(source) ?? 0) >= limit;
   const take = (key, lane, name, source, url = `${HANDSHAKE}/jobs/${key}`, extra = {}) => {
     if (!key || spent.has(key) || queued.has(key) || full(source)) return;
+    // A host on the owner's brake list (runs/blocked-hosts.tsv) is never emitted: discovery does not put back what
+    // the queue was told to skip.
+    if (blocked.has(hostOfUrl(url))) return;
     queued.add(key);
     perSource.set(source, (perSource.get(source) ?? 0) + 1);
     found.push({ url, lane, name: name.replace(/\s+/g, ' ').replace(/\t/g, ' ').trim().slice(0, 90), source, ...extra });
@@ -189,10 +194,13 @@ async function workdayDiscovery({ max, dryRun }) {
     root: HERE, max, includeTitlePattern: RELEVANT, excludeTitlePattern: UNFIT, excludeEmployerPattern: EXCLUDED_EMPLOYER,
     spent: spentJobs(), queued: new Set(priorRows.map(row => jobKey(row.url)).filter(Boolean)), keyFor: jobKey, laneFor,
   });
-  if (!dryRun && rows.length) {
-    writeFileSync(file, prior + (prior && !prior.endsWith('\n') ? '\n' : '') + rows.map(row => `${row.url}\t${row.lane}\t${row.name}\n`).join(''));
+  // The owner's brake list (runs/blocked-hosts.tsv): a blocked tenant is never put back in the Workday queue.
+  const blocked = blockedHosts();
+  const kept = rows.filter(row => !blocked.has(hostOfUrl(row.url)));
+  if (!dryRun && kept.length) {
+    writeFileSync(file, prior + (prior && !prior.endsWith('\n') ? '\n' : '') + kept.map(row => `${row.url}\t${row.lane}\t${row.name}\n`).join(''));
   }
-  console.log(`WORKDAY_DISCOVERED ${rows.length} new of ${seen} (tenants ${tenants}, US country facet ${faceted}, ${abroad} dropped by their record's country)${dryRun ? ' [dry run, not written]' : ''}`);
+  console.log(`WORKDAY_DISCOVERED ${kept.length} new of ${seen} (tenants ${tenants}, US country facet ${faceted}, ${abroad} dropped by their record's country, ${rows.length - kept.length} blocked-host)${dryRun ? ' [dry run, not written]' : ''}`);
 }
 
 // Rows whose employer posting states pay above discovery.minHourly (USD/hr, at the converted range floor), up to

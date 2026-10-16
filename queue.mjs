@@ -8,7 +8,9 @@
 // outage (site-down) moves the posting to the queue's end, at most twice; any other stop (a field or
 // document only the user has, closed posting) moves on. Postings on a domain where at least 3 runs hit a CAPTCHA and
 // none submitted are set aside for manual application without a run; 3 postings in a row failing in the model
-// provider (out of credits) halt the queue. Rows leave queue.tsv once
+// provider (out of credits) halt the queue. A host on the owner's brake list (runs/blocked-hosts.tsv) is skipped and
+// its row dropped; a host whose own 3 runs in a pool did not submit is skipped for the rest of that pool, its rows
+// left in the queue for the next one. Rows leave queue.tsv once
 // handled; results append to runs/queue-results.txt and each run's console output to runs/queue-logs/<name>.log.
 import { appendFileSync, mkdirSync, createWriteStream, existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -17,6 +19,7 @@ import { spawn } from 'node:child_process';
 import { homedir } from 'node:os';
 import { readQueue, writeQueue, jobKey, jobHistory } from './discover.mjs';
 import { loadConfig } from './lib/config.mjs';
+import { blockedHosts } from './lib/blocked-hosts.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const CONFIG = loadConfig();
@@ -125,6 +128,23 @@ const sitedown = new Map();
 // Consecutive postings whose runs all failed in the model provider (out of credits, provider outage): every later
 // posting would fail the same way, so the queue halts keeping the posting queued.
 let providerFailures = 0;
+// A host whose own runs keep stopping is taken out of this pool's rotation: after STOP_LIMIT consecutive runs that
+// did not submit on one employer host, its remaining rows are skipped (SKIPPED host-breaker) and left in the queue for
+// the next pool, which starts with a clean slate. In-memory only; a run that submits clears its host's count.
+const STOP_LIMIT = 3;
+const hostStops = new Map();
+const breakerHosts = new Set();
+const breakerSkipped = new Set();
+function hostOutcome(host, submitted) {
+  if (submitted) {
+    hostStops.delete(host);
+    breakerHosts.delete(host);
+    return;
+  }
+  const stops = (hostStops.get(host) ?? 0) + 1;
+  hostStops.set(host, stops);
+  if (stops >= STOP_LIMIT) breakerHosts.add(host);
+}
 // Postings in flight by key, and the worker slots free for the next one.
 const inflight = new Map();
 const free = Array.from({ length: WORKERS }, (_, i) => i);
@@ -139,14 +159,27 @@ const leave = (row, next = null) => writeQueue([...readQueue(QUEUE).filter(other
 const hostOf = url => new URL(url).hostname.toLowerCase();
 function pick() {
   const setAside = captchaSites();
+  const blocked = blockedHosts();
   const busyHosts = new Set([...inflight.values()].map(entry => entry.host));
   for (const row of readQueue(QUEUE)) {
     if (handled >= limit) return null;
     if (inflight.has(keyOf(row)) || busyHosts.has(hostOf(row.url))) continue;
     const head = `=== ${row.name} (${row.lane}) ${row.url}`;
+    // A host this pool has already broken: no run. Its rows stay in the queue (not handled, so they do not eat
+    // --limit) for the next pool to try; each is reported once.
+    if (breakerHosts.has(hostOf(row.url))) {
+      if (!breakerSkipped.has(keyOf(row))) {
+        breakerSkipped.add(keyOf(row));
+        record(`${head}\nSKIPPED host-breaker (${STOP_LIMIT} stops on ${hostOf(row.url)}; left for the next pool)`);
+      }
+      continue;
+    }
     const history = jobHistory().get(jobKey(row.url));
     handled += 1;
-    if (history?.done && !(RETRY && !history.terminal)) {
+    if (blocked.has(hostOf(row.url))) {
+      record(`${head}\nSKIPPED blocked-host ${blocked.get(hostOf(row.url))}`);
+      leave(row);
+    } else if (history?.done && !(RETRY && !history.terminal)) {
       record(`${head}\nSKIPPED (${history.submitted ? 'already submitted' : history.terminal ? 'closed or applied' : 'waiting on the user'})`);
       leave(row);
     } else if (setAsideFor(setAside, row.url)) {
@@ -178,6 +211,8 @@ async function runPosting(row, slot) {
     const run = await apply(row, logName, workerEnv(slot));
     const secs = Math.round((Date.now() - started) / 1000);
     const reason = run?.reason ?? `no summary (killed after ${RUN_SECONDS}s or crashed)`;
+    // The pool's per-host brake: every run that did not submit counts toward its host's breaker.
+    hostOutcome(hostOf(row.url), run?.outcome === 'submitted');
     const providerDown = run?.outcome !== 'submitted' && /^(driver-error|planner-error)/.test(reason);
     if (!providerDown) providerFailures = 0;
     if (run?.outcome === 'submitted') {
