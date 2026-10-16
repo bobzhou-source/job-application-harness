@@ -134,9 +134,10 @@ Review `queue.tsv` and your local answers before running the queue: queued execu
 ```sh
 bun report.mjs
 bun report.mjs --apps [--since ISO]
+bun report.mjs --applications [--since ISO] [--csv path]
 ```
 
-The default report summarizes per-run telemetry. `--apps` folds all attempts for each posting into an application tracker and writes `runs/applications.csv`, including status, the employer's latest reply, next actor, attempts, time, model cost, and submitted document information.
+The default report summarizes per-run telemetry. `--apps` folds all attempts for each posting into an application tracker and writes `runs/applications.csv`, including status, the employer's latest reply, next actor, attempts, time, model cost, and submitted document information. `--applications` writes one row per unique submitted job to `runs/applications.tsv` (or `--csv path`) with company, title, ATS, location, lane, hourly pay, resume, host, and URL, then prints company, state, city, remote, lane, ATS, day, pay, and coverage tables.
 
 ### Track employer replies, to-dos, and outreach
 

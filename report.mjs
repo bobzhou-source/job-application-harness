@@ -6,6 +6,9 @@
 // together) with lane, title, latest status, the employer's latest reply (runs/mail.json, written by `bun mail.mjs`),
 // stop category, who must act next, attempts, time, cost, and the resume and documents it went out with; written to
 // runs/applications.csv and summarized by category.
+// `bun report.mjs --applications [--since ISO] [--csv path]` is the submitted-postings breakdown instead: one row
+// per unique submitted job with company, title, ATS, location, lane, hourly pay, resume, host, and URL; written to
+// runs/applications.tsv and summarized by company, state, city, remote, lane, ATS, day, and pay.
 // Cost views (lib/report/costs.mjs): `--days` per-day API spend and per-submit price next to the subscription calls'
 // size and list-price equivalent; `--purposes` the same per role and purpose from the selected runs' traces;
 // `--billing` the providers' own counters and balances against the metered spend (snapshots in runs/billing.jsonl).
@@ -25,6 +28,7 @@ import { days, purposes, subscription, billing } from './lib/report/costs.mjs';
 import { quality } from './lib/report/quality.mjs';
 import { updateLedger } from './lib/report/ledger.mjs';
 import { provenance, suspects, siteAnswers } from './lib/report/audit.mjs';
+import { applicationBreakdown } from './lib/report/applications.mjs';
 
 const args = process.argv.slice(2);
 const arg = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
@@ -64,6 +68,10 @@ const tally = (list, key) => Object.entries(list.reduce((acc, item) => { const k
 // Trace buckets stay keyed by the model slot; print them under role-neutral names.
 const ROLES = { jev: 'driver', deepseek: 'planner', writer: 'writer' };
 
+if (args.includes('--applications')) {
+  applicationBreakdown(rows, allRows, { csv: arg('--csv') });
+  process.exit(0);
+}
 if (args.includes('--apps')) {
   applications(rows);
   process.exit(0);
