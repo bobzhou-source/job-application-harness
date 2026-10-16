@@ -5,9 +5,11 @@
 // --discover refills queue.tsv from the configured discovery sources (discover.mjs) whenever it runs dry.
 // Per posting: a run that stops for a transient reason (model budget, planner/driver error) is retried once; a
 // CAPTCHA or MFA gate posts a notification and its tab stays open for the user to finish whenever they can; a site
-// outage (site-down) moves the posting to the queue's end, at most twice; any other stop (a field or
+// outage (site-down) moves the posting to the queue's end, at most twice; a network-outage gets the transient retry,
+// then also returns to the queue's end without counting toward the host breaker; any other stop (a field or
 // document only the user has, closed posting) moves on. Postings on a domain where at least 3 runs hit a CAPTCHA and
-// none submitted are set aside for manual application without a run; 3 postings in a row failing in the model
+// none submitted are set aside for manual application without a run; a host that submits but starts challenging rests
+// 3 h after two captchas in 2 h, its gated rows deferred to the queue's end; 3 postings in a row failing in the model
 // provider (out of credits) halt the queue. A host on the owner's brake list (runs/blocked-hosts.tsv) is skipped and
 // its row dropped; a host whose own 3 runs in a pool did not submit is skipped for the rest of that pool, its rows
 // left in the queue for the next one. Rows leave queue.tsv once
@@ -34,7 +36,7 @@ if (NOTIFICATIONS.backend === 'macos-osascript' && process.platform !== 'darwin'
 
 // The configured resume filename for a lane, e.g. resumes.filePattern "resume_{lane}.pdf".
 const resumePath = lane => path.join(RESUMES, CONFIG.resumes.filePattern.replace('{lane}', lane));
-const TRANSIENT = /^(consult-limit|iteration-limit|planner-error|driver-error|implementation-error|action-outcome-unknown|Could not start or attach)/;
+const TRANSIENT = /^(consult-limit|iteration-limit|planner-error|driver-error|implementation-error|action-outcome-unknown|network-outage|Could not start or attach)/;
 const GATE = /^(?!captcha-rejected)(?:.*?)(^gate (captcha|mfa)|captcha|human[- ]verification|robot)/i;
 
 const args = process.argv.slice(2);
@@ -90,19 +92,56 @@ function captchaSites() {
   const bump = (key, row) => {
     const count = tally.get(key) ?? { captcha: 0, submitted: 0 };
     if (row.outcome === 'submitted') count.submitted += 1;
-    else if (GATE.test(row.reason ?? '') && !/\bmfa\b/i.test(row.reason ?? '')) count.captcha += 1;
+    else if (isCaptcha(row.reason)) count.captcha += 1;
     tally.set(key, count);
   };
-  for (const line of readFileSync(`${HERE}runs/summary.jsonl`, 'utf8').split('\n')) {
-    let row;
-    try { row = JSON.parse(line); } catch { continue; }
-    if (!row.job) continue;
+  for (const row of summaryRows()) {
     bump(siteOf(row.job), row);
     if (hostOf(row.job) !== siteOf(row.job)) bump(hostOf(row.job), row);
   }
   return new Set([...tally].filter(([key, count]) => count.submitted === 0 && count.captcha >= (key.split('.').length > 2 ? 2 : 3)).map(([key]) => key));
 }
 const setAsideFor = (setAside, url) => [hostOf(url), siteOf(url)].find(key => setAside.has(key));
+const isCaptcha = reason => GATE.test(reason ?? '') && !/\bmfa\b/i.test(reason ?? '');
+// Every summary row that names a posting, oldest first.
+function summaryRows() {
+  const rows = [];
+  for (const line of readFileSync(`${HERE}runs/summary.jsonl`, 'utf8').split('\n')) {
+    let row;
+    try { row = JSON.parse(line); } catch { continue; }
+    if (row.job) rows.push(row);
+  }
+  return rows;
+}
+// A host that normally submits but has started challenging (Ashby's hCaptcha appears on submit once the IP has sent
+// enough applications in a short span; 24/25 Ashby runs submitted on 10-15, then 6 captchas on 10-16) is rested:
+// after COOLDOWN_HITS captcha stops within COOLDOWN_WINDOW_MS with no submit since the last one, its rows are skipped
+// until COOLDOWN_MS after that last captcha and left in the queue. host → ISO time the rest ends.
+const COOLDOWN_HITS = 2;
+const COOLDOWN_WINDOW_MS = 2 * 3600_000;
+const COOLDOWN_MS = 3 * 3600_000;
+function captchaCooldowns(now = Date.now()) {
+  const perHost = new Map();
+  for (const row of summaryRows()) {
+    const t = Date.parse(row.t);
+    if (!(t >= now - COOLDOWN_WINDOW_MS)) continue;
+    const host = hostOf(row.job);
+    const state = perHost.get(host) ?? { captchas: 0, last: 0, submittedSince: false };
+    if (row.outcome === 'submitted') state.submittedSince = true;
+    else if (isCaptcha(row.reason)) { state.captchas += 1; state.last = Math.max(state.last, t); state.submittedSince = false; }
+    perHost.set(host, state);
+  }
+  const resting = new Map();
+  for (const [host, state] of perHost) {
+    if (state.captchas >= COOLDOWN_HITS && !state.submittedSince && now < state.last + COOLDOWN_MS) resting.set(host, new Date(state.last + COOLDOWN_MS).toISOString().slice(11, 16) + 'Z');
+  }
+  return resting;
+}
+// Whether `host` submitted at least once in the last 24 h: a captcha there is a rate check worth retrying later, not
+// the site's standing policy.
+function submitsRecently(host, now = Date.now()) {
+  return summaryRows().some(row => hostOf(row.job) === host && row.outcome === 'submitted' && Date.parse(row.t) >= now - 24 * 3600_000);
+}
 
 function notify(text) {
   if (NOTIFICATIONS.backend === 'console') {
@@ -122,14 +161,16 @@ function discover() {
 }
 
 let handled = 0;
+let networkOutages = 0;
 let halt = null;
-// Site-down deferrals per posting this queue run.
+// Site-down and captcha-on-a-submitting-host deferrals per posting this queue run.
 const sitedown = new Map();
+const captchaDeferrals = new Map();
 // Consecutive postings whose runs all failed in the model provider (out of credits, provider outage): every later
 // posting would fail the same way, so the queue halts keeping the posting queued.
 let providerFailures = 0;
 // A host whose own runs keep stopping is taken out of this pool's rotation: after STOP_LIMIT consecutive runs that
-// did not submit on one employer host, its remaining rows are skipped (SKIPPED host-breaker) and left in the queue for
+// did not submit on one employer host (network-outage runs excepted), its remaining rows are skipped (SKIPPED host-breaker) and left in the queue for
 // the next pool, which starts with a clean slate. In-memory only; a run that submits clears its host's count.
 const STOP_LIMIT = 3;
 const hostStops = new Map();
@@ -149,7 +190,7 @@ function hostOutcome(host, submitted) {
 const inflight = new Map();
 const free = Array.from({ length: WORKERS }, (_, i) => i);
 const keyOf = row => jobKey(row.url) ?? row.url;
-// Removes every copy of this posting from the queue; a site-down deferral goes to the end.
+// Removes every copy of this posting from the queue; a site-down or network-outage deferral goes to the end.
 const leave = (row, next = null) => writeQueue([...readQueue(QUEUE).filter(other => keyOf(other) !== keyOf(row)), ...(next ? [next] : [])], QUEUE);
 
 // The next posting to dispatch, or null. Postings already settled (skipped or set aside) are handled as they are reached.
@@ -159,18 +200,21 @@ const leave = (row, next = null) => writeQueue([...readQueue(QUEUE).filter(other
 const hostOf = url => new URL(url).hostname.toLowerCase();
 function pick() {
   const setAside = captchaSites();
+  const resting = captchaCooldowns();
   const blocked = blockedHosts();
   const busyHosts = new Set([...inflight.values()].map(entry => entry.host));
   for (const row of readQueue(QUEUE)) {
     if (handled >= limit) return null;
     if (inflight.has(keyOf(row)) || busyHosts.has(hostOf(row.url))) continue;
     const head = `=== ${row.name} (${row.lane}) ${row.url}`;
-    // A host this pool has already broken: no run. Its rows stay in the queue (not handled, so they do not eat
-    // --limit) for the next pool to try; each is reported once.
-    if (breakerHosts.has(hostOf(row.url))) {
+    // A host this pool has already broken, or one resting after captchas: no run. Its rows stay in the queue (not
+    // handled, so they do not eat --limit) for a later pool to try; each is reported once.
+    if (breakerHosts.has(hostOf(row.url)) || resting.has(hostOf(row.url))) {
       if (!breakerSkipped.has(keyOf(row))) {
         breakerSkipped.add(keyOf(row));
-        record(`${head}\nSKIPPED host-breaker (${STOP_LIMIT} stops on ${hostOf(row.url)}; left for the next pool)`);
+        record(resting.has(hostOf(row.url))
+          ? `${head}\nSKIPPED captcha-cooldown (${hostOf(row.url)} is challenging; left for a pool after ${resting.get(hostOf(row.url))})`
+          : `${head}\nSKIPPED host-breaker (${STOP_LIMIT} stops on ${hostOf(row.url)}; left for the next pool)`);
       }
       continue;
     }
@@ -211,8 +255,10 @@ async function runPosting(row, slot) {
     const run = await apply(row, logName, workerEnv(slot));
     const secs = Math.round((Date.now() - started) / 1000);
     const reason = run?.reason ?? `no summary (killed after ${RUN_SECONDS}s or crashed)`;
-    // The pool's per-host brake: every run that did not submit counts toward its host's breaker.
-    hostOutcome(hostOf(row.url), run?.outcome === 'submitted');
+    const networkOutage = /^network-outage(?:\s|$)/.test(reason);
+    if (networkOutage) networkOutages += 1;
+    // A local/network outage is not evidence about this employer host; every other non-submit counts toward its breaker.
+    if (!networkOutage) hostOutcome(hostOf(row.url), run?.outcome === 'submitted');
     const providerDown = run?.outcome !== 'submitted' && /^(driver-error|planner-error)/.test(reason);
     if (!providerDown) providerFailures = 0;
     if (run?.outcome === 'submitted') {
@@ -228,6 +274,8 @@ async function runPosting(row, slot) {
     }
     lines.push(`STOPPED (${reason.slice(0, 200)}) secs=${secs}`);
     if (retried) {
+      // Outages never consume the posting: after the transient retry, put its row back at the queue's end.
+      if (networkOutage) deferred = row;
       if (providerDown) providerFailures += 1;
       if (providerFailures >= 3) {
         lines.push('QUEUE_HALTED model-provider errors on 3 postings in a row (check provider credits)');
@@ -238,9 +286,15 @@ async function runPosting(row, slot) {
     }
     // A captcha or MFA step is left open in its own tab for the user to finish whenever they can; the queue moves on.
     // A headless worker has no tab the user can reach: its gated posting is saved to runs/handoff-gated.tsv for a run
-    // in the visible Chrome (the queue would skip it: a gate stop marks the posting as waiting on the user).
+    // in the visible Chrome (the queue would skip it: a gate stop marks the posting as waiting on the user). A captcha
+    // on a host that submitted within 24 h is a rate check instead: the row goes back to the queue's end (at most
+    // twice) for a pool after the host's cooldown.
     if (GATE.test(reason) || /^captcha-rejected/.test(reason)) {
-      if (HEADLESS) {
+      if (HEADLESS && isCaptcha(reason) && submitsRecently(hostOf(row.url)) && (captchaDeferrals.get(jobKey(row.url)) ?? 0) < 2) {
+        captchaDeferrals.set(jobKey(row.url), (captchaDeferrals.get(jobKey(row.url)) ?? 0) + 1);
+        lines.push(`DEFERRED captcha on a host that submits (${hostOf(row.url)}); back to the queue's end for a later pool`);
+        deferred = row;
+      } else if (HEADLESS) {
         lines.push('GATED (headless; row saved to runs/handoff-gated.tsv for the visible Chrome)');
         appendFileSync(path.join(HERE, 'runs', 'handoff-gated.tsv'), `${row.url}\t${row.lane}\t${row.name}\n`);
       } else {
@@ -289,5 +343,5 @@ for (;;) {
   await discover();
   if (!readQueue(QUEUE).length) break;
 }
-record('QUEUE_DONE');
+record(`QUEUE_DONE network-outage=${networkOutages}`);
 process.exit(0);
