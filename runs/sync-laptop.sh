@@ -2,7 +2,8 @@
 # Mac-side sync for the laptop runner. Code moves through Git; this script moves ignored personal state.
 #   runs/sync-laptop.sh push   Mac -> laptop: private inputs, queues, portable config, Gmail runtime/token files
 #   runs/sync-laptop.sh pull   laptop -> Mac: reports, mail index, and per-run JSONL traces
-# Both modes take the single-writer runner-host lock and fail closed if a runner is active.
+# push takes the single-writer runner-host lock and fails closed if a runner is active; pull only copies report
+# inputs back to the Mac (never queues, config, or credentials), so it runs while the laptop runner holds the lock.
 set -euo pipefail
 umask 077
 
@@ -19,8 +20,8 @@ case "$MODE" in
   *) echo "usage: runs/sync-laptop.sh push|pull" >&2; exit 64 ;;
 esac
 
-if ! "$HARNESS/runs/runner-host-lock.sh" acquire "sync:$HOST_ID:$$"; then
-  echo "refusing sync: runner-host lock is held" >&2
+if [ "$MODE" = push ] && ! "$HARNESS/runs/runner-host-lock.sh" acquire "sync:$HOST_ID:$$"; then
+  echo "refusing push: runner-host lock is held" >&2
   exit 75
 fi
 release_lock() {
@@ -115,7 +116,7 @@ if [ "$MODE" = push ]; then
 fi
 
 # Pull only report inputs, never config, queues, credentials, or browser profiles.
-trap 'release_lock' EXIT
+trap - EXIT
 rsync -rlpt --rsync-path="$RSYNC_PATH" \
   --include='summary.jsonl' --include='[0-9]*.jsonl' --include='mail.json' --include='mail-done.json' \
   --include='applications.tsv' --include='applications.csv' --exclude='*' \
