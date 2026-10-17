@@ -143,17 +143,17 @@ ssh windows "wsl -d Ubuntu -- git -C /home/bob/job-harness pull --ff-only"
 Move ignored applicant state and pull results with:
 
 ```sh
-runs/sync-laptop.sh push   # private inputs, queues, config path rewrite, Gmail manifests/token files
+runs/sync-laptop.sh push   # private inputs, queues, config path rewrite, Gmail files, credential backend code
 runs/sync-laptop.sh pull   # summary, mail index, reports, and per-run JSONL traces
 ```
 
-`push` refuses while any runner holds the host lock. The laptop config uses a Linux Chrome executable and laptop-local paths; the source-of-truth files remain on the Mac. Set `JOB_HARNESS_REMOTE_SSH`, `JOB_HARNESS_REMOTE_ROOT`, or `JOB_HARNESS_REMOTE_HOME` to use different SSH/path defaults. The Gmail server still needs a Node runtime on the laptop, not just Bun.
+`push` refuses while any runner holds the host lock. The laptop config uses a Linux Chrome executable and laptop-local paths; the Mac remains the edit source while the laptop is the only runner host. Push also refreshes the small credential-backend files so a laptop can use `credentials.backend: "file"` before those changes are committed. Set `JOB_HARNESS_REMOTE_SSH`, `JOB_HARNESS_REMOTE_ROOT`, or `JOB_HARNESS_REMOTE_HOME` to use different SSH/path defaults. The Gmail server still needs a Node runtime on the laptop, not just Bun.
 
 The laptop uses `credentials.backend: "file"`; its store lives at `~/.config/job-harness/credentials.json` (AES-256-GCM, mode 600) with the key at `~/.config/job-harness/credentials.key` (mode 600). The Mac remains on `macos-keychain`. `runs/export-credentials-to-laptop.sh` copies every harness Keychain item to that store; it never prints values.
 
-The 15-minute mail watcher runs through the same host split: on the laptop it is the `ops-jobmail.timer` systemd unit in `/etc/systemd/system`, and on the Mac the fallback is `~/Library/LaunchAgents/com.bob.jobmail.plist` with `StartInterval` 900. Both run `bun mail.mjs watch --once` from the harness checkout and log to `runs/smoke/mail-watch.log`. Only one host should have the timer enabled.
+The 15-minute mail watcher runs through the same host split: on the laptop it is the `ops-jobmail.timer` systemd unit in `/etc/systemd/system`, and on the Mac the fallback is `~/Library/LaunchAgents/com.bob.jobmail.plist` with `StartInterval` 900. Both run `bun mail.mjs watch --once` from the harness checkout and log to `runs/smoke/mail-watch.log`. Only one host should have the timer enabled; at cutover the laptop timer is enabled and the Mac plist is moved aside to keep a single watcher.
 
-`/etc/systemd/system/ops-jobharness-runner.service` is the laptop SYSTEM unit for the daytime chain (`runs/chain-day.sh`, boards then Workday, `Restart=always`). Install it as root with `User=bob`; keep it disabled until the host-lock, Chrome, Gmail, and credential gates above have been checked. Laptop notifications use the console backend, so the runners' own Poke messages remain the alert path.
+`/etc/systemd/system/ops-jobharness-runner.service` is the laptop SYSTEM unit for the daytime chain (`runs/chain-day.sh`, boards then Workday, `Restart=always`). Install it as root with `User=bob`; keep it disabled until the host-lock, Chrome, Gmail, and credential gates above have been checked, and keep it disabled while submissions are frozen. Laptop notifications use the console backend, so the runners' own Poke messages remain the alert path.
 
 ### Report results
 
