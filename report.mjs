@@ -9,6 +9,8 @@
 // `bun report.mjs --applications [--since ISO] [--csv path]` is the submitted-postings breakdown instead: one row
 // per unique submitted job with company, title, ATS, location, lane, hourly pay, resume, host, and URL; written to
 // runs/applications.tsv and summarized by company, state, city, remote, lane, ATS, day, and pay.
+// `bun report.mjs --outcomes [--since ISO] [--last N]` is the reply-latency view: per-employer submit→first-rejection
+// hours, rejection rate by ATS/lane/submit day, median latency, and applications rejected in under six hours.
 // Cost views (lib/report/costs.mjs): `--days` per-day API spend and per-submit price next to the subscription calls'
 // size and list-price equivalent; `--purposes` the same per role and purpose from the selected runs' traces;
 // `--billing` the providers' own counters and balances against the metered spend (snapshots in runs/billing.jsonl).
@@ -27,8 +29,9 @@ import { loadConfig } from './lib/config.mjs';
 import { days, purposes, subscription, billing } from './lib/report/costs.mjs';
 import { quality } from './lib/report/quality.mjs';
 import { updateLedger } from './lib/report/ledger.mjs';
-import { provenance, suspects, siteAnswers } from './lib/report/audit.mjs';
+import { provenance, suspects, siteAnswers, workAuthAudit, workAuthApplicationsAudit } from './lib/report/audit.mjs';
 import { applicationBreakdown } from './lib/report/applications.mjs';
+import { outcomeReport } from './lib/report/outcomes.mjs';
 
 const args = process.argv.slice(2);
 const arg = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
@@ -72,6 +75,10 @@ if (args.includes('--applications')) {
   applicationBreakdown(rows, allRows, { csv: arg('--csv') });
   process.exit(0);
 }
+if (args.includes('--outcomes')) {
+  outcomeReport(rows, { laneFor: row => (row.resume ?? '').match(RESUME_NAME)?.[1] ?? '' });
+  process.exit(0);
+}
 if (args.includes('--apps')) {
   applications(rows);
   process.exit(0);
@@ -80,7 +87,7 @@ if (args.includes('--days')) { await days(rows); process.exit(0); }
 if (args.includes('--purposes')) { await purposes(rows); process.exit(0); }
 if (args.includes('--subscription')) { await subscription(rows); process.exit(0); }
 if (args.includes('--billing')) { await billing(allRows); process.exit(0); }
-const ledgerViews = ['--quality', '--suspects', '--answer', '--site-answers', '--index'];
+const ledgerViews = ['--quality', '--suspects', '--answer', '--site-answers', '--index', '--audit-workauth'];
 if (ledgerViews.some(flag => args.includes(flag))) {
   const all = args.includes('--all');
   const { rows: ledger, added, indexed } = updateLedger(allRows, { rebuild: args.includes('--rebuild') });
@@ -88,6 +95,10 @@ if (ledgerViews.some(flag => args.includes(flag))) {
   const selected = new Set(rows.map(row => row.trace));
   const chosen = ledger.filter(row => selected.has(row.run));
   if (args.includes('--quality')) quality(chosen, { all });
+  else if (args.includes('--audit-workauth')) {
+    const wrong = workAuthAudit(ledger);
+    workAuthApplicationsAudit(ledger, wrong);
+  }
   else if (args.includes('--suspects')) suspects(chosen, { all });
   else if (args.includes('--answer')) provenance(ledger, arg('--answer') ?? '', { all });
   else if (args.includes('--site-answers')) siteAnswers(ledger, { annotate: args.includes('--annotate') });

@@ -50,7 +50,7 @@ Additional tools and platform limits:
 
 - `pdftotext` is **required**: doctor checks it, and the writer uses it to extract resume material for written answers.
 - `pdflatex`, `resumes.factsFile`, and `resumes.latexPreamble` are conditional: needed only when document generation (cover letters, instructed documents) is configured.
-- Employer password storage currently supports only macOS Keychain. Selecting `credentials.backend: "macos-keychain"` on another platform produces an actionable error.
+- Employer password storage supports macOS Keychain (`macos-keychain`) and an AES-256-GCM file store (`file`) at `~/.config/job-harness/credentials.json` with a mode-600 key beside it. Use the Keychain on macOS and the file backend on Linux.
 - `notifications.backend: "macos-osascript"` is macOS-only. The public example uses portable console notifications.
 - Read-only Gmail verification is optional and disabled in the public example. Enabling it requires a compatible local multi-Gmail MCP server and its credential files.
 - `omp` is optional. It is used only when a model backend is explicitly set to `"omp"` in your local configuration; there is no implicit credential or model fallback to it.
@@ -129,26 +129,59 @@ The queue runs one application at a time with `--submit`, using the configured t
 
 Review `queue.tsv` and your local answers before running the queue: queued execution includes final-submit authorization.
 
+### Run from an always-on host
+
+The unattended runners can run on a second machine (for example a Windows laptop's WSL checkout) while the Mac sleeps. The laptop is the only runner host: `runs/overnight.sh` and `runs/overnight-boards.sh` take the `runs/runner-host` lock before doing any work, and a second host's runner exits without starting a pool. On the Mac the lock is acquired through the laptop over SSH; the Mac has no SSH server, so the laptop's checkout is authoritative.
+
+Move code with Git, not with the state sync:
+
+```sh
+git push origin main
+ssh windows "wsl -d Ubuntu -- git -C /home/bob/job-harness pull --ff-only"
+```
+
+Move ignored applicant state and pull results with:
+
+```sh
+runs/sync-laptop.sh push   # private inputs, queues, config path rewrite, Gmail manifests/token files
+runs/sync-laptop.sh pull   # summary, mail index, reports, and per-run JSONL traces
+```
+
+`push` refuses while any runner holds the host lock. The laptop config uses a Linux Chrome executable and laptop-local paths; the source-of-truth files remain on the Mac. Set `JOB_HARNESS_REMOTE_SSH`, `JOB_HARNESS_REMOTE_ROOT`, or `JOB_HARNESS_REMOTE_HOME` to use different SSH/path defaults. The Gmail server still needs a Node runtime on the laptop, not just Bun.
+
+The laptop uses `credentials.backend: "file"`; its store lives at `~/.config/job-harness/credentials.json` (AES-256-GCM, mode 600) with the key at `~/.config/job-harness/credentials.key` (mode 600). The Mac remains on `macos-keychain`. `runs/export-credentials-to-laptop.sh` copies every harness Keychain item to that store; it never prints values.
+
+The 15-minute mail watcher runs through the same host split: on the laptop it is the `ops-jobmail.timer` systemd unit in `/etc/systemd/system`, and on the Mac the fallback is `~/Library/LaunchAgents/com.bob.jobmail.plist` with `StartInterval` 900. Both run `bun mail.mjs watch --once` from the harness checkout and log to `runs/smoke/mail-watch.log`. Only one host should have the timer enabled.
+
+`/etc/systemd/system/ops-jobharness-runner.service` is the laptop SYSTEM unit for the daytime chain (`runs/chain-day.sh`, boards then Workday, `Restart=always`). Install it as root with `User=bob`; keep it disabled until the host-lock, Chrome, Gmail, and credential gates above have been checked. Laptop notifications use the console backend, so the runners' own Poke messages remain the alert path.
+
 ### Report results
 
 ```sh
 bun report.mjs
 bun report.mjs --apps [--since ISO]
 bun report.mjs --applications [--since ISO] [--csv path]
+bun report.mjs --outcomes [--since ISO] [--last N]
 ```
 
-The default report summarizes per-run telemetry. `--apps` folds all attempts for each posting into an application tracker and writes `runs/applications.csv`, including status, the employer's latest reply, next actor, attempts, time, model cost, and submitted document information. `--applications` writes one row per unique submitted job to `runs/applications.tsv` (or `--csv path`) with company, title, ATS, location, lane, hourly pay, resume, host, and URL, then prints company, state, city, remote, lane, ATS, day, pay, and coverage tables.
+The default report summarizes per-run telemetry. `--apps` folds all attempts for each posting into an application tracker and writes `runs/applications.csv`, including status, the employer's latest reply, next actor, attempts, time, model cost, and submitted document information. `--applications` writes one row per unique submitted job to `runs/applications.tsv` (or `--csv path`) with company, title, ATS, location, lane, hourly pay, resume, host, and URL, then prints company, state, city, remote, lane, ATS, day, pay, and coverage tables. `--outcomes` measures replies over submitted applications: per-employer submit→first-rejection hours, rejection rate by ATS, lane, and submit day, median latency, and the list rejected in under six hours.
 
 ### Track employer replies, to-dos, and outreach
 
 ```sh
 bun mail.mjs [--since ISO] [--follow-up DAYS]   # sync: index job email, rebuild to-dos, print outcomes
+bun mail.mjs watch [--once]                      # sync and act on new outcomes; repeat every 15 minutes without --once
 bun mail.mjs todo                                # open to-dos from the last sync, most urgent first
 bun mail.mjs open N                              # open to-do N's action link (assessment, scheduling, application) in the browser
 bun mail.mjs done N | undo N                     # mark to-do N handled, or reopen it
 ```
 
 Requires `email.enabled`. A sync reads the configured inbox (read-only) and writes `runs/mail.json`; `report.mjs --apps` then fills its `reply` column from that file.
+
+- **Watch:** `mail.mjs watch` runs that sync, then diffs event ids against `runs/mail-watch.json`. Each new assessment, interview, offer, or incomplete notice is texted through Poke with employer, role, kind, and the deadline stated in the email, converted to America/New_York time. A first run seeds the existing backlog without texting it, except assessments due inside 48 hours; it also writes `runs/mail-digest.txt` without sending that first digest. After seeding, a daily digest is sent at 13:00Z with new submits, rejections, open assessments (and those due inside 48 hours), interviews, offers, and knockout flags. Rejections do not get individual texts.
+- **Grad-only roles:** a role in a hard (`hard=true`) row of `runs/audit-degree-submitted.tsv` is never texted as an action item; the digest marks it `ignore (grad-only)`.
+- **Knockout detector:** a rejection in under six hours, or at least three rejections from one employer within an hour, triggers a trace read. The watcher lists the application's work-authorization, sponsorship, citizenship, clearance, graduation, class-standing, degree, GPA, relocation, start-date, and age answers, compares them with `answers.json` facts, appends evidence to `runs/knockout-flags.tsv`, and texts `KNOCKOUT? <employer> <question> = <answer>` for each contradiction. A seeding run writes the evidence but suppresses backlog urgent texts.
+- **State:** `runs/mail-watch.json` holds seen event ids, pending notification retries, the digest day, knockout flags, and sent urgent messages. It is written atomically under a file lock. Poke needs `POKE_API_KEY` in the environment or the Bun-loaded `.env`; failures remain pending for the next run.
 
 - **Index:** every job email since `--since` (default: the first attempted application) is matched to the posting it answers by sender and subject: company name, ATS tenant, or the employer's own domain. Bodies are never used for matching. A subject naming a different role at the same employer is not attributed to the posting. Mail matching no posting is indexed under the sender's employer.
 - **Outcomes:** each email is classified as `offer`, `rejected`, `completed` (an assessment acknowledged), `assessment`, `interview`, `incomplete`, `confirmed`, or `update`. Fixed patterns ignore conditional and negated boilerplate such as "if selected, we will schedule an interview" or "this email is not an offer of employment". The sync lists offers, interview requests and rejections, postings a run recorded as stopped that the employer answered anyway (proof the submit went through), and job mail from applications made outside the harness.
@@ -257,7 +290,7 @@ The complete schema is:
     "oauthCredentials": "~/.gmail-mcp-oauth.json"
   },
   "credentials": {
-    "backend": "macos-keychain",
+    "backend": "file",
     "servicePrefix": "job-app:"
   },
   "notifications": {
@@ -338,7 +371,7 @@ False or empty values mean “do not make this claim”; they are not converted 
 ### Email, credentials, notifications, queue, and runtime
 
 - `email.enabled`: enables read-only verification automation. When false, email verification stops for manual completion. When true, `accountLabel`, `mcpServer`, `tokenDatabase`, and `oauthCredentials` must identify readable local resources.
-- `credentials.backend`: currently `macos-keychain` only. `servicePrefix` defaults to `job-app:`.
+- `credentials.backend`: `macos-keychain` (macOS Keychain, `servicePrefix` defaults to `job-app:`) or `file` (AES-256-GCM store at `~/.config/job-harness/credentials.json`, key and store mode 600). `servicePrefix` is used only by the Keychain backend.
 - `notifications.backend`: `console` or macOS-only `macos-osascript`; `title` and `sound` configure notifications.
 - `queue.runTimeoutSeconds`: per-application timeout; default `900`.
 - `runtime.debug`: enables debug output.

@@ -96,7 +96,7 @@
     "oauthCredentials": "~/.gmail-mcp-oauth.json"
   },
   "credentials": {
-    "backend": "macos-keychain",
+    "backend": "file",
     "servicePrefix": "job-app:"
   },
   "notifications": {

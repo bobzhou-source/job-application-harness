@@ -1,7 +1,13 @@
 node_modules/
 driver/runtime/
 answers.json
-runs/
+runs/*
+!runs/chain-day.sh
+!runs/overnight-boards.sh
+!runs/overnight.sh
+!runs/runner-host-lock.sh
+!runs/sync-laptop.sh
+!runs/export-credentials-to-laptop.sh
 aliases.json
 tabs.json
 learned.json
