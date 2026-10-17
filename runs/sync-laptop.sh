@@ -111,7 +111,13 @@ if [ "$MODE" = push ]; then
     "$REMOTE_HOME/.gmail-mcp-oauth.json"
   remote_run chmod -R go-rwx "$REMOTE_HOME/resumes"
 
-  echo "pushed private inputs and queues to $REMOTE_SSH:$REMOTE_ROOT"
+  # Code travels through git: the laptop checkout must run exactly what the Mac pushed to origin/main.
+  if [ -n "$(git -C "$HARNESS" status --porcelain --untracked-files=no)" ] || [ "$(git -C "$HARNESS" rev-parse HEAD)" != "$(git -C "$HARNESS" rev-parse '@{u}')" ]; then
+    echo "warning: Mac checkout has uncommitted or unpushed code; the laptop gets origin/main only" >&2
+  fi
+  remote_run git -C "$REMOTE_ROOT" fetch -q origin
+  remote_run git -C "$REMOTE_ROOT" merge -q --ff-only origin/main
+  echo "pushed private inputs and queues to $REMOTE_SSH:$REMOTE_ROOT; code at $(remote_run git -C "$REMOTE_ROOT" log --oneline -1)"
   exit 0
 fi
 
