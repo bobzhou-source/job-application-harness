@@ -126,6 +126,15 @@ PY
   olog "pool $N done (rc=$rc): SUBMITTED=$s STOPPED=$p SKIPPED=$k FAILED=$f; remaining=$(data_rows)"
   clean_workers
   if [ "$rc" -eq 124 ]; then STOP_REASON='15:00Z cutoff'; break; fi
+  # A platform outage is not evidence about the postings: sleep it out and retry the same queue rather than
+  # counting this 0-submit pool toward the two-pool stop rule.
+  if grep -q '^QUEUE_HALTED platform-outage' "$plog"; then
+    fam=$(grep -o '^QUEUE_HALTED platform-outage [^ ]*' "$plog" | tail -1 | awk '{print $3}')
+    olog "pool $N halted: platform-outage $fam; sleeping 20 min and retrying (not counted toward the 0-submit stop rule)"
+    N=$((N + 1))
+    sleep 1200
+    continue
+  fi
   if [ "$s" -eq 0 ]; then ZERO_STREAK=$((ZERO_STREAK + 1)); else ZERO_STREAK=0; fi
   if [ "$ZERO_STREAK" -ge 2 ]; then STOP_REASON='two consecutive 0-submit pools'; break; fi
   N=$((N + 1))

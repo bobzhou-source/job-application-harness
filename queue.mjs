@@ -5,7 +5,9 @@
 // --discover refills queue.tsv from the configured discovery sources (discover.mjs) whenever it runs dry.
 // Per posting: a run that stops for a transient reason (model budget, planner/driver error) is retried once; a
 // CAPTCHA or MFA gate posts a notification and its tab stays open for the user to finish whenever they can; a site
-// outage (site-down) moves the posting to the queue's end, at most twice; a network-outage gets the transient retry,
+// outage (site-down) moves the posting to the queue's end, at most twice (never during a platform outage: >=4 ATS
+// hosts down in 10 min halt the queue with "platform-outage <family>" and every row stays queued, no deferral
+// spent); a network-outage gets the transient retry,
 // then also returns to the queue's end without counting toward the host breaker; any other stop (a field or
 // document only the user has, closed posting) moves on. Postings on a domain where at least 3 runs hit a CAPTCHA and
 // none submitted are set aside for manual application without a run; a host that submits but starts challenging rests
@@ -176,6 +178,34 @@ const STOP_LIMIT = 3;
 const hostStops = new Map();
 const breakerHosts = new Set();
 const breakerSkipped = new Set();
+// Platform outage breaker: site-down stops (or the ATS's own hosts failing to load at all) on >=4 distinct employer
+// hosts of one ATS family inside 10 minutes mean the platform is down (Workday's 2026-10-17 maintenance stopped
+// 917 runs and churned 15 postings out of the queue). Dispatch halts with "platform-outage <family>": every row
+// stays queued, the halted posting's deferrals are not spent, and while the outage is on no site-down row is
+// dropped. runs/overnight*.sh sleep 20 min on this halt and retry instead of counting a 0-submit pool.
+const OUTAGE_WINDOW_MS = 10 * 60 * 1000;
+const OUTAGE_HOSTS = 4;
+const OUTAGE_STOP = /^(site-down|external-site-failed-to-load)(?:\s|\()/;
+const outageHits = [];
+// The ATS family a hostname belongs to: the shared platform domain, so aig.wd1 and gfs.wd5 count together while two
+// employers on their own domains never do.
+function atsFamily(host) {
+  const match = host.match(/(?:^|\.)(myworkdayjobs\.com|myworkday\.com|greenhouse\.io|lever\.co|ashbyhq\.com|smartrecruiters\.com|icims\.com|taleo\.net|oraclecloud\.com|successfactors\.com|workable\.com|jobvite\.com|ultipro\.com|recruitee\.com|pinpointhq\.com|breezy\.hr|yello\.co)$/);
+  return match ? match[1] : host;
+}
+// The family currently in outage (>=OUTAGE_HOSTS distinct hosts down inside the window), else null.
+function outageFamily() {
+  const now = Date.now();
+  while (outageHits.length && now - outageHits[0].t > OUTAGE_WINDOW_MS) outageHits.shift();
+  const byFamily = new Map();
+  for (const hit of outageHits) {
+    const hosts = byFamily.get(hit.family) ?? new Set();
+    hosts.add(hit.host);
+    byFamily.set(hit.family, hosts);
+  }
+  for (const [family, hosts] of byFamily) if (hosts.size >= OUTAGE_HOSTS) return family;
+  return null;
+}
 function hostOutcome(host, submitted) {
   if (submitted) {
     hostStops.delete(host);
@@ -273,6 +303,17 @@ async function runPosting(row, slot) {
       return { lines, deferred: null, halt: 'account-blocked' };
     }
     lines.push(`STOPPED (${reason.slice(0, 200)}) secs=${secs}`);
+    // An ATS-wide outage halts dispatch with the posting kept queued: the platform, not this posting, is down.
+    if (OUTAGE_STOP.test(reason)) {
+      const host = hostOf(row.url);
+      const family = atsFamily(host);
+      outageHits.push({ t: Date.now(), family, host });
+      if (outageFamily() === family) {
+        lines.push(`QUEUE_HALTED platform-outage ${family} (site-down on >=${OUTAGE_HOSTS} hosts in 10 min; every row kept queued)`);
+        notify(`Platform outage (${family}): queue halted, rows kept queued for a retry after the outage`);
+        return { lines, deferred: null, halt: `platform-outage ${family}` };
+      }
+    }
     if (retried) {
       // Outages never consume the posting: after the transient retry, put its row back at the queue's end.
       if (networkOutage) deferred = row;
@@ -304,9 +345,14 @@ async function runPosting(row, slot) {
     }
     if (!(TRANSIENT.test(reason) || !run)) {
       // An outage outlasts an immediate retry: try again after the rest of the queue (at most twice per posting).
-      if (/^site-down/.test(reason) && sitedown.get(jobKey(row.url)) !== 2) {
-        sitedown.set(jobKey(row.url), (sitedown.get(jobKey(row.url)) ?? 0) + 1);
-        deferred = row;
+      // While the posting's platform is out, the row goes back without spending a deferral: an outage never drops it.
+      if (/^site-down/.test(reason)) {
+        if (outageFamily() === atsFamily(hostOf(row.url))) {
+          deferred = row;
+        } else if (sitedown.get(jobKey(row.url)) !== 2) {
+          sitedown.set(jobKey(row.url), (sitedown.get(jobKey(row.url)) ?? 0) + 1);
+          deferred = row;
+        }
       }
       return { lines, deferred, halt: null };
     }
