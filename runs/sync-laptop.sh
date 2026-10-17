@@ -1,9 +1,11 @@
 #!/bin/bash
-# Mac-side sync for the laptop runner. Code moves through Git; this script moves ignored personal state.
-#   runs/sync-laptop.sh push   Mac -> laptop: private inputs, queues, portable config, Gmail runtime/token files
-#   runs/sync-laptop.sh pull   laptop -> Mac: reports, mail index, and per-run JSONL traces
-# push takes the single-writer runner-host lock and fails closed if a runner is active; pull only copies report
-# inputs back to the Mac (never queues, config, or credentials), so it runs while the laptop runner holds the lock.
+# Mac-side sync for the laptop runner. The laptop owns all runner state and works alone while the Mac is off; the
+# Mac only mirrors it back when it can reach the laptop (com.bob.jobsync pulls every 30 min and at login).
+#   runs/sync-laptop.sh push          Mac -> laptop: code (fast-forward to origin/main), portable config, .env,
+#                                     profile, Gmail runtime/token files, resumes. Never the runner's state.
+#   runs/sync-laptop.sh push --seed   also overwrite the laptop's state (answers, aliases, learned, queues, blocked
+#                                     hosts) with the Mac copy; needs the runner-host lock (no runner active).
+#   runs/sync-laptop.sh pull          laptop -> Mac: that state plus reports, mail state and traces (read-only copy).
 set -euo pipefail
 umask 077
 
@@ -20,8 +22,9 @@ case "$MODE" in
   *) echo "usage: runs/sync-laptop.sh push|pull" >&2; exit 64 ;;
 esac
 
-if [ "$MODE" = push ] && ! "$HARNESS/runs/runner-host-lock.sh" acquire "sync:$HOST_ID:$$"; then
-  echo "refusing push: runner-host lock is held" >&2
+SEED=0; [ "${2:-}" = --seed ] && SEED=1
+if [ "$SEED" = 1 ] && ! "$HARNESS/runs/runner-host-lock.sh" acquire "sync:$HOST_ID:$$"; then
+  echo "refusing push --seed: runner-host lock is held" >&2
   exit 75
 fi
 release_lock() {
@@ -47,20 +50,15 @@ rsync_to_remote() {
 remote_mkdir "$REMOTE_ROOT/runs" "$REMOTE_ROOT/runs/smoke" "$REMOTE_HOME/resumes" "$REMOTE_HOME/.omp/tools"
 
 if [ "$MODE" = push ]; then
-  required=(answers.json aliases.json learned.json .env profile.md queue.tsv runs/blocked-hosts.tsv runs/workday-queue.tsv)
-  [ -e "$HARNESS/runs/workers.conf" ] && required+=(runs/workers.conf)
+  required=(.env profile.md)
+  state=(answers.json aliases.json learned.json queue.tsv runs/blocked-hosts.tsv runs/workday-queue.tsv)
+  [ "$SEED" = 1 ] && required+=("${state[@]}")
+  [ "$SEED" = 1 ] && [ -e "$HARNESS/runs/workers.conf" ] && required+=(runs/workers.conf)
   for file in "${required[@]}"; do
     [ -s "$HARNESS/$file" ] || { echo "missing or empty: $file" >&2; exit 1; }
   done
 
   (cd "$HARNESS" && rsync_to_remote -R "${required[@]}")
-
-  # The credential backend and importer are small and must match the rewritten backend before the owner commits.
-  code=(lib/credentials.mjs lib/config.mjs lib/setup/checks.mjs tools/credentials-import.mjs)
-  for file in "${code[@]}"; do
-    [ -s "$HARNESS/$file" ] || { echo "missing or empty: $file" >&2; exit 1; }
-  done
-  (cd "$HARNESS" && rsync_to_remote -R "${code[@]}")
 
   # Rewrite only machine-specific paths. Secrets and all other settings are copied unchanged.
   config_tmp=$(mktemp)
@@ -117,14 +115,21 @@ if [ "$MODE" = push ]; then
   fi
   remote_run git -C "$REMOTE_ROOT" fetch -q origin
   remote_run git -C "$REMOTE_ROOT" merge -q --ff-only origin/main
-  echo "pushed private inputs and queues to $REMOTE_SSH:$REMOTE_ROOT; code at $(remote_run git -C "$REMOTE_ROOT" log --oneline -1)"
+  echo "pushed inputs$([ "$SEED" = 1 ] && echo ' and seeded state') to $REMOTE_SSH:$REMOTE_ROOT; code at $(remote_run git -C "$REMOTE_ROOT" log --oneline -1)"
   exit 0
 fi
 
-# Pull only report inputs, never config, queues, credentials, or browser profiles.
+# Pull mirrors the laptop's state onto the Mac (never config, credentials, or browser profiles). Quiet no-op when
+# the laptop is unreachable, so a schedule can run it blindly.
 trap - EXIT
+ssh -o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR "$REMOTE_SSH" "wsl -d Ubuntu -- true" >/dev/null 2>&1 \
+  || { echo "laptop unreachable; nothing pulled"; exit 0; }
+rsync -lpt --rsync-path="$RSYNC_PATH" \
+  -- "$REMOTE_SSH:$REMOTE_ROOT/answers.json" "$REMOTE_SSH:$REMOTE_ROOT/aliases.json" "$REMOTE_SSH:$REMOTE_ROOT/learned.json" \
+  "$REMOTE_SSH:$REMOTE_ROOT/queue.tsv" "$HARNESS/"
 rsync -rlpt --rsync-path="$RSYNC_PATH" \
-  --include='summary.jsonl' --include='[0-9]*.jsonl' --include='mail.json' --include='mail-done.json' \
-  --include='applications.tsv' --include='applications.csv' --exclude='*' \
+  --include='summary.jsonl' --include='[0-9]*.jsonl' --include='mail*.json' --include='mail-digest.txt' \
+  --include='knockout-flags.tsv' --include='workday-queue.tsv' --include='blocked-hosts.tsv' --include='queue-results.txt' \
+  --include='applications.tsv' --include='applications.csv' --include='workers.conf' --exclude='*' \
   -- "$REMOTE_SSH:$REMOTE_ROOT/runs/" "$HARNESS/runs/"
-echo "pulled reports and traces from $REMOTE_SSH:$REMOTE_ROOT/runs"
+echo "$(date -u +%FT%TZ) pulled state, reports and traces from $REMOTE_SSH:$REMOTE_ROOT"

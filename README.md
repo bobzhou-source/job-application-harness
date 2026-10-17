@@ -143,11 +143,12 @@ ssh windows "wsl -d Ubuntu -- git -C /home/bob/job-harness pull --ff-only"
 Move ignored applicant state and pull results with:
 
 ```sh
-runs/sync-laptop.sh push   # private inputs, queues, config path rewrite, Gmail files, credential backend code
-runs/sync-laptop.sh pull   # summary, mail index, reports, and per-run JSONL traces
+runs/sync-laptop.sh push          # code (laptop fast-forwards to origin/main), config path rewrite, .env, profile, Gmail files, resumes
+runs/sync-laptop.sh push --seed   # also overwrite the laptop's answers/aliases/learned/queues with the Mac copy (no runner active)
+runs/sync-laptop.sh pull          # mirror the laptop's state, summary, mail state, reports, and traces onto the Mac
 ```
 
-`push` refuses while any runner holds the host lock. The laptop config uses a Linux Chrome executable and laptop-local paths; the Mac remains the edit source while the laptop is the only runner host. Push also refreshes the small credential-backend files so a laptop can use `credentials.backend: "file"` before those changes are committed. Set `JOB_HARNESS_REMOTE_SSH`, `JOB_HARNESS_REMOTE_ROOT`, or `JOB_HARNESS_REMOTE_HOME` to use different SSH/path defaults. The Gmail server still needs a Node runtime on the laptop, not just Bun.
+The laptop owns all runner state (answers, aliases, learned choices, queues, ledger, mail state) and keeps working while the Mac is off. The Mac copy is a mirror: the `com.bob.jobsync` LaunchAgent runs `pull` every 30 minutes and at login, and does nothing when the laptop is unreachable. Edit state on the laptop, or edit on the Mac and `push --seed` while no runner holds the host lock. The laptop runner's `runs/chain-day.sh` fast-forwards its checkout to `origin/main` before each chain and refuses to start on a diverged checkout. Set `JOB_HARNESS_REMOTE_SSH`, `JOB_HARNESS_REMOTE_ROOT`, or `JOB_HARNESS_REMOTE_HOME` to use different SSH/path defaults. The Gmail server still needs a Node runtime on the laptop, not just Bun.
 
 The laptop uses `credentials.backend: "file"`; its store lives at `~/.config/job-harness/credentials.json` (AES-256-GCM, mode 600) with the key at `~/.config/job-harness/credentials.key` (mode 600). The Mac remains on `macos-keychain`. `runs/export-credentials-to-laptop.sh` copies every harness Keychain item to that store; it never prints values.
 
