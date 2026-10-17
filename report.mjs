@@ -169,6 +169,7 @@ function category(row) {
   const table = [
     [/captcha-rejected/i, 'captcha-rejected', 'user: captcha in held tab'],
     [/^ineligible-degree/i, 'ineligible-degree', ''],
+    [/^ineligible-schedule/i, 'ineligible-schedule', ''],
     [/^account-blocked/i, 'account-blocked', 'user: contact job-board support'],
     [/already (applied|submitted)|application (is already|was) submitted/i, 'already-applied', ''],
     [/^site-down/i, 'site-down', 'rerun later'],

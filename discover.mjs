@@ -13,7 +13,7 @@ import * as browser from './lib/browser.mjs';
 import { loadConfig } from './lib/config.mjs';
 import { blockedHosts, hostOfUrl } from './lib/blocked-hosts.mjs';
 import { postingDetails, boardPostings, markdownPostings, linkedinPostings, freehirePostings, workdayPostings, levelsPostings, quantYamlPostings } from './lib/discover/sources.mjs';
-import { degreeRequirement } from './lib/eligibility.mjs';
+import { degreeRequirement, scheduleRequirement } from './lib/eligibility.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 export const QUEUE_FILE = `${HERE}queue.tsv`;
@@ -78,7 +78,7 @@ export function jobKey(url) {
 }
 
 // Per posting, from every recorded run: done (submitted, closed, or already applied) and how many runs stopped.
-const TERMINAL = /already (applied|submitted|shows|records|been applied)|previously submitted|submitted successfully|application was submitted|applied on|not accepting|no longer|is closed|registration is closed|unable to apply|cannot be applied|not currently applicable|not open for applications|must wait|posting-unavailable|SUBMITTED earlier|ineligible-degree/i;
+const TERMINAL = /already (applied|submitted|shows|records|been applied)|previously submitted|submitted successfully|application was submitted|applied on|not accepting|no longer|is closed|registration is closed|unable to apply|cannot be applied|not currently applicable|not open for applications|must wait|posting-unavailable|SUBMITTED earlier|ineligible-(?:degree|schedule)/i;
 // A stop that waits on the user (a captcha to solve by hand, an answer, a document, a mailbox link) ends the same way
 // on every retry: the posting is the user's now and is never queued again.
 const USER_WAIT = /^(captcha-rejected|needs-user|needs-document|gate (captcha|mfa))/i;
@@ -182,15 +182,15 @@ async function main() {
   const bySource = Map.groupBy(found, row => row.source);
   const mixed = Array.from({ length: Math.max(0, ...[...bySource.values()].map(rows => rows.length)) }, (_, i) => [...bySource.values()].map(rows => rows[i]).filter(Boolean)).flat();
   const paid = gated ? await payGate(mixed, max) : found;
-  // After the pay gate, a posting whose title or description requires or targets graduate enrollment is dropped
-  // before it reaches the queue (the same gate runs over --workday refills below).
-  const { kept, dropped: droppedGraduate } = await degreeGate(paid);
+  // After the pay gate, a posting whose title or description requires or targets graduate enrollment or work during
+  // the academic year is dropped before it reaches the queue (the same gate runs over --workday refills below).
+  const { kept, droppedGraduate, droppedSchedule } = await eligibilityGate(paid);
   for (const row of kept) console.log(`${row.lane}\t${row.name}\t${row.url}\t(${row.source})`);
   const keptBySource = Map.groupBy(kept, row => row.source);
   for (const source of new Set(sources)) {
     console.log(`SOURCE ${source} ${perSource.get(source) ?? 0} candidates ${keptBySource.get(source)?.length ?? 0} kept`);
   }
-  console.log(`${kept.length} new posting(s)${gated ? ` with stated pay above $${CONFIG.discovery.minHourly}/hr (of ${found.length} candidates)` : ''}; ${droppedGraduate} dropped (graduate-only)${dryRun ? ' (dry run, queue unchanged)' : ` queued in ${queuePath}`}`);
+  console.log(`${kept.length} new posting(s)${gated ? ` with stated pay above $${CONFIG.discovery.minHourly}/hr (of ${found.length} candidates)` : ''}; ${droppedGraduate} dropped (graduate-only), ${droppedSchedule} dropped (academic-year/term)${dryRun ? ' (dry run, queue unchanged)' : ` queued in ${queuePath}`}`);
   if (!dryRun) writeQueue([...queue, ...kept], queuePath);
   process.exit(0);
 }
@@ -208,19 +208,21 @@ async function workdayDiscovery({ max, dryRun }) {
   // The owner's brake list (runs/blocked-hosts.tsv): a blocked tenant is never put back in the Workday queue.
   const blocked = blockedHosts();
   const unblocked = rows.filter(row => !blocked.has(hostOfUrl(row.url)));
-  const { kept, dropped: droppedGraduate } = await degreeGate(unblocked);
+  const { kept, droppedGraduate, droppedSchedule } = await eligibilityGate(unblocked);
   if (!dryRun && kept.length) {
     writeFileSync(file, prior + (prior && !prior.endsWith('\n') ? '\n' : '') + kept.map(row => `${row.url}\t${row.lane}\t${row.name}\n`).join(''));
   }
-  console.log(`WORKDAY_DISCOVERED ${kept.length} new of ${seen} (tenants ${tenants}, US country facet ${faceted}, ${abroad} dropped by their record's country, ${rows.length - unblocked.length} blocked-host, ${droppedGraduate} dropped (graduate-only))${dryRun ? ' [dry run, not written]' : ''}`);
+  console.log(`WORKDAY_DISCOVERED ${kept.length} new of ${seen} (tenants ${tenants}, US country facet ${faceted}, ${abroad} dropped by their record's country, ${rows.length - unblocked.length} blocked-host, ${droppedGraduate} dropped (graduate-only), ${droppedSchedule} dropped (academic-year/term))${dryRun ? ' [dry run, not written]' : ''}`);
 }
 
-// Drop postings whose title or own page text requires or targets graduate enrollment. A feed row already carrying
-// text is classified from it; one without text is read through the same postingDetails() the pay gate uses. A page
-// that cannot be read, and a row with neither title nor text, is kept rather than guessed at.
-async function degreeGate(rows) {
+// Drop postings whose title or own page text requires or targets graduate enrollment, or requires work during the
+// academic year or a non-summer term. A feed row already carrying text is classified from it; one without text is
+// read through the same postingDetails() the pay gate uses. A page that cannot be read, and a row with neither title
+// nor text, is kept rather than guessed at.
+async function eligibilityGate(rows) {
   const kept = [];
-  let dropped = 0;
+  let droppedGraduate = 0;
+  let droppedSchedule = 0;
   let next = 0;
   const worker = async () => {
     while (next < rows.length) {
@@ -228,17 +230,24 @@ async function degreeGate(rows) {
       const details = row.postingText || row.text ? null : await postingDetails(row.url, CONFIG.discovery.fx).catch(() => null);
       const title = row.title || details?.title || '';
       const text = row.postingText || row.text || details?.text || '';
-      const verdict = degreeRequirement(`${title}\n${text}`);
-      if (verdict.hard) {
-        dropped += 1;
-        console.error(`skip ${row.name}: graduate-only (${verdict.level}: ${verdict.evidence})`);
+      const posting = `${title}\n${text}`;
+      const degree = degreeRequirement(posting);
+      if (degree.hard) {
+        droppedGraduate += 1;
+        console.error(`skip ${row.name}: graduate-only (${degree.level}: ${degree.evidence})`);
+        continue;
+      }
+      const schedule = scheduleRequirement(posting);
+      if (schedule.hard) {
+        droppedSchedule += 1;
+        console.error(`skip ${row.name}: academic-year/term (${schedule.evidence})`);
       } else {
         kept.push(row);
       }
     }
   };
   await Promise.all(Array.from({ length: 6 }, worker));
-  return { kept, dropped };
+  return { kept, droppedGraduate, droppedSchedule };
 }
 
 // Rows whose employer posting states pay above discovery.minHourly (USD/hr, at the converted range floor), up to
