@@ -11,6 +11,11 @@
 // runs/applications.tsv and summarized by company, state, city, remote, lane, ATS, day, and pay.
 // `bun report.mjs --outcomes [--since ISO] [--last N]` is the reply-latency view: per-employer submit→first-rejection
 // hours, rejection rate by ATS/lane/submit day, median latency, and applications rejected in under six hours.
+// `bun report.mjs --ledger` joins every source into runs/ledger.jsonl (one row per unique submitted application):
+// posting, submit telemetry, documents/essays, controlled answer keys, same-company context, and mail outcomes.
+// `bun report.mjs --insights` prints decision rates (rejection or assessment/interview; auto-acknowledgements
+// counted separately) by dimension with 95% Wilson intervals, over applications submitted at least 3 days
+// before the newest mail sync so young ones do not read as silent.
 // Cost views (lib/report/costs.mjs): `--days` per-day API spend and per-submit price next to the subscription calls'
 // size and list-price equivalent; `--purposes` the same per role and purpose from the selected runs' traces;
 // `--billing` the providers' own counters and balances against the metered spend (snapshots in runs/billing.jsonl).
@@ -32,6 +37,7 @@ import { updateLedger } from './lib/report/ledger.mjs';
 import { provenance, suspects, siteAnswers, workAuthAudit, workAuthApplicationsAudit } from './lib/report/audit.mjs';
 import { applicationBreakdown } from './lib/report/applications.mjs';
 import { outcomeReport } from './lib/report/outcomes.mjs';
+import { ledgerReport, insightsReport } from './lib/report/app-ledger.mjs';
 
 const args = process.argv.slice(2);
 const arg = name => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : undefined; };
@@ -71,6 +77,14 @@ const tally = (list, key) => Object.entries(list.reduce((acc, item) => { const k
 // Trace buckets stay keyed by the model slot; print them under role-neutral names.
 const ROLES = { jev: 'driver', deepseek: 'planner', writer: 'writer' };
 
+if (args.includes('--ledger')) {
+  ledgerReport(rows, allRows);
+  process.exit(0);
+}
+if (args.includes('--insights')) {
+  insightsReport(rows, allRows);
+  process.exit(0);
+}
 if (args.includes('--applications')) {
   applicationBreakdown(rows, allRows, { csv: arg('--csv') });
   process.exit(0);
