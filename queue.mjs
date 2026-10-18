@@ -9,14 +9,19 @@
 // hosts down in 10 min halt the queue with "platform-outage <family>" and every row stays queued, no deferral
 // spent); a network-outage gets the transient retry,
 // then also returns to the queue's end without counting toward the host breaker; any other stop (a field or
-// document only the user has, closed posting) moves on. Postings on a domain where at least 3 runs hit a CAPTCHA and
-// none submitted are set aside for manual application without a run; a host that submits but starts challenging rests
-// 3 h after two captchas in 2 h, its gated rows deferred to the queue's end; 3 postings in a row failing in the model
-// provider (out of credits) halt the queue. A host on the owner's brake list (runs/blocked-hosts.tsv) is skipped and
-// its row dropped; a host whose own 3 runs in a pool did not submit is skipped for the rest of that pool, its rows
-// left in the queue for the next one. Rows leave queue.tsv once
+// document only the user has, closed posting) moves on. Before Chrome opens, a plain HTTP/ATS API check closes a
+// posting on a definitive 404/410 only (403, timeouts, and 200 pages fall through); a row whose employer identity
+// repeats the same blocking reason is deferred with that reason and left queued: iteration-limit after 2, captcha/
+// MFA/credential/missing work-history/document/sensitive-data after 3, planner-refused-loop after 6 (the last needs
+// stronger evidence before the next posting is held), consult-limit after 12 (a per-run budget), while a submit there
+// clears the count and driver/site/provider, field, and closed-posting stops never count. Postings on a domain where
+// at least 3 runs hit a CAPTCHA and none submitted are set aside for manual application without a run; a host that
+// submits but starts challenging rests 3 h after two captchas in 2 h, its gated rows deferred to the queue's end;
+// 3 postings in a row failing in the model provider (out of credits) halt the queue. A host on the owner's brake list
+// (runs/blocked-hosts.tsv) is skipped and its row dropped; a host whose own 3 runs in a pool did not submit is
+// skipped for the rest of that pool, its rows left in the queue for the next one. Rows leave queue.tsv once
 // handled; results append to runs/queue-results.txt and each run's console output to runs/queue-logs/<name>.log.
-import { appendFileSync, mkdirSync, createWriteStream, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, createWriteStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -24,6 +29,8 @@ import { homedir } from 'node:os';
 import { readQueue, writeQueue, jobKey, jobHistory } from './discover.mjs';
 import { loadConfig } from './lib/config.mjs';
 import { blockedHosts } from './lib/blocked-hosts.mjs';
+import { historyDeferrals, deferralFor, postingStatus } from './lib/preflight.mjs';
+import { CODE_VERSION } from './lib/trace.mjs';
 
 const HERE = fileURLToPath(new URL('.', import.meta.url));
 const CONFIG = loadConfig();
@@ -105,14 +112,24 @@ function captchaSites() {
 }
 const setAsideFor = (setAside, url) => [hostOf(url), siteOf(url)].find(key => setAside.has(key));
 const isCaptcha = reason => GATE.test(reason ?? '') && !/\bmfa\b/i.test(reason ?? '');
-// Every summary row that names a posting, oldest first.
+// Every summary row that names a posting, oldest first. pick() asks three times per dispatch, so reuse the parsed
+// rows until an append changes the file (size and mtime).
+let summaryCache = { key: null, rows: [] };
 function summaryRows() {
+  const file = `${HERE}runs/summary.jsonl`;
+  let key;
+  try {
+    const stat = statSync(file);
+    key = `${stat.size}:${stat.mtimeMs}`;
+  } catch { return []; }
+  if (summaryCache.key === key) return summaryCache.rows;
   const rows = [];
-  for (const line of readFileSync(`${HERE}runs/summary.jsonl`, 'utf8').split('\n')) {
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
     let row;
     try { row = JSON.parse(line); } catch { continue; }
     if (row.job) rows.push(row);
   }
+  summaryCache = { key, rows };
   return rows;
 }
 // A host that normally submits but has started challenging (Ashby's hCaptcha appears on submit once the IP has sent
@@ -231,6 +248,13 @@ const STOP_LIMIT = 3;
 const hostStops = new Map();
 const breakerHosts = new Set();
 const breakerSkipped = new Set();
+// An employer identity repeating the same blocking reason inside this window has that evidence reviewed before
+// another browser/model run: captcha/MFA, credentials, and missing work-history/document/sensitive data after 3,
+// iteration-limit after 2, planner-refused-loop after 6, consult-limit after 12 (see DEFERRAL_LIMIT in lib/preflight.mjs).
+// Its rows stay queued with the reason; a submit clears the record, and the window expires a host that stopped being
+// tried. Calibrated by replaying the 10-16/17 traces with zero submits skipped; see the queue comment above.
+const HISTORY_STOP_LIMIT = 3;
+const HISTORY_STOP_WINDOW_MS = 24 * 3600_000;
 // Platform outage breaker: site-down stops (or the ATS's own hosts failing to load at all) on >=4 distinct employer
 // hosts of one ATS family inside 10 minutes mean the platform is down (Workday's 2026-10-17 maintenance stopped
 // 917 runs and churned 15 postings out of the queue). Dispatch halts with "platform-outage <family>": every row
@@ -285,6 +309,7 @@ function pick() {
   const setAside = captchaSites();
   const resting = captchaCooldowns();
   const blocked = blockedHosts();
+  const recentStops = historyDeferrals(summaryRows(), { limit: HISTORY_STOP_LIMIT, windowMs: HISTORY_STOP_WINDOW_MS, code: CODE_VERSION });
   const busyHosts = new Set([...inflight.values()].map(entry => entry.host));
   for (const row of readQueue(QUEUE)) {
     if (handled >= limit) return null;
@@ -302,17 +327,29 @@ function pick() {
       continue;
     }
     const history = jobHistory().get(jobKey(row.url));
-    handled += 1;
+    const deferred = deferralFor(recentStops, row.url);
     if (blocked.has(hostOf(row.url))) {
+      handled += 1;
       record(`${head}\nSKIPPED blocked-host ${blocked.get(hostOf(row.url))}`);
       leave(row);
     } else if (history?.done && !(RETRY && !history.terminal)) {
+      handled += 1;
       record(`${head}\nSKIPPED (${history.submitted ? 'already submitted' : history.terminal ? 'closed or applied' : 'waiting on the user'})`);
       leave(row);
     } else if (setAsideFor(setAside, row.url)) {
+      handled += 1;
       record(`${head}\nSET ASIDE (every run on ${setAsideFor(setAside, row.url)} hit a CAPTCHA; apply manually)`);
       leave(row);
+    } else if (deferred) {
+      // This host/tenant already repeated the same blocking reason to its calibrated count (3 for employer gates,
+      // 2 for iteration-limit, 6 for planner-refused-loop, 12 for consult-limit) in the last 24 h. Keep the row
+      // queued with that reason (not handled, so it does not eat --limit) for a later pool.
+      if (!breakerSkipped.has(keyOf(row))) {
+        breakerSkipped.add(keyOf(row));
+        record(`${head}\nDEFERRED history (${deferred.count} × ${deferred.reason} on ${deferred.key}; left queued for a later pool)`);
+      }
     } else {
+      handled += 1;
       return row;
     }
   }
@@ -331,6 +368,13 @@ function workerEnv(slot) {
 async function runPosting(row, slot) {
   const logName = row.name.replace(/[^\w]+/g, '_').slice(0, 60);
   const lines = [`=== ${row.name} (${row.lane}) ${row.url}`];
+  // A definitive ATS/HTTP miss costs one request instead of a browser and a model call. Unknown states fall through
+  // to the normal run, so an anti-bot 403 or a timeout cannot discard a live application.
+  const posting = await postingStatus(row.url);
+  if (posting.state === 'closed') {
+    lines.push(`CLOSED preflight (${posting.source} ${posting.detail})`);
+    return { lines, deferred: null, halt: null };
+  }
   let deferred = null;
   let retried = false;
   for (;;) {
