@@ -105,7 +105,8 @@
     "sound": "Glass"
   },
   "queue": {
-    "runTimeoutSeconds": 900
+    "runTimeoutSeconds": 900,
+    "costGuard": { "dailyCapUsd": 25, "perSubmitFactor": 5 }
   },
   "runtime": {
     "debug": false

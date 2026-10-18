@@ -135,6 +135,11 @@ PY
     sleep 1200
     continue
   fi
+  # A cost guard halt is a billing stop, not an outage: end the night instead of retrying into the cap.
+  if grep -q '^QUEUE_HALTED cost-guard' "$plog"; then
+    STOP_REASON="cost guard: $(grep -o '^QUEUE_HALTED cost-guard [^;]*' "$plog" | tail -1)"
+    break
+  fi
   if [ "$s" -eq 0 ]; then ZERO_STREAK=$((ZERO_STREAK + 1)); else ZERO_STREAK=0; fi
   if [ "$ZERO_STREAK" -ge 2 ]; then STOP_REASON='two consecutive 0-submit pools'; break; fi
   N=$((N + 1))

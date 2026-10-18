@@ -153,6 +153,59 @@ function notify(text) {
   spawn('osascript', ['-e', `display notification ${JSON.stringify(text)} with title ${JSON.stringify(NOTIFICATIONS.title)} sound name ${JSON.stringify(NOTIFICATIONS.sound)}`]);
 }
 
+// Billing brakes, checked after every run against runs/summary.jsonl (whose `cost` is the run's metered spend):
+//  - spend per submit over the last COST_WINDOW runs versus the median of the last COST_DAYS days' spend per submit
+//    (factor from config.queue.costGuard.perSubmitFactor, default 5): a provider reprice or a loop that burns calls
+//    on every posting shows here long before the credits run out;
+//  - the day's total against config.queue.costGuard.dailyCapUsd (default 25).
+// A halt keeps every remaining row queued and stops dispatch; runs/overnight*.sh end the night on it instead of
+// retrying, because spending is what the guard is stopping.
+const COST_WINDOW = 30;
+const COST_DAYS = 7;
+function costGuard(now = Date.now()) {
+  const rows = summaryRows().filter(row => Number.isFinite(row.cost) && Number.isFinite(Date.parse(row.t)));
+  if (!rows.length) return null;
+  const dayOf = t => new Date(t).toISOString().slice(0, 10);
+  const perSubmitOf = rs => {
+    const submits = rs.filter(row => row.outcome === 'submitted').length;
+    return submits ? rs.reduce((sum, row) => sum + row.cost, 0) / submits : null;
+  };
+  const recent = rows.slice(-COST_WINDOW);
+  const recentPerSubmit = perSubmitOf(recent);
+  const days = new Map();
+  for (const row of rows) {
+    const day = dayOf(Date.parse(row.t));
+    if (day >= dayOf(now - (COST_DAYS - 1) * 86400_000)) days.set(day, [...(days.get(day) ?? []), row]);
+  }
+  const baseline = [...days.entries()].filter(([day]) => day !== dayOf(now))
+    .map(([, rs]) => perSubmitOf(rs)).filter(value => value !== null).sort((a, b) => a - b);
+  const median = baseline.length ? baseline[Math.floor(baseline.length / 2)] : null;
+  const today = rows.filter(row => dayOf(Date.parse(row.t)) === dayOf(now));
+  const todaySpend = today.reduce((sum, row) => sum + row.cost, 0);
+  const { dailyCapUsd, perSubmitFactor } = CONFIG.queue.costGuard;
+  if (todaySpend > dailyCapUsd) {
+    return { halt: 'cost-guard daily-cap', text: `$${todaySpend.toFixed(2)} spent today, cap $${dailyCapUsd.toFixed(2)}` };
+  }
+  if (median !== null && median > 0 && recentPerSubmit !== null
+    && recent.some(row => row.outcome === 'submitted') && recentPerSubmit > perSubmitFactor * median) {
+    return {
+      halt: 'cost-guard per-submit',
+      text: `$${recentPerSubmit.toFixed(2)} per submit over the last ${COST_WINDOW} runs, ${perSubmitFactor}x the ${COST_DAYS}-day median $${median.toFixed(2)}`,
+    };
+  }
+  return null;
+}
+
+// The billing brake applied to one finished run: the reason goes into its lines and the posting stays queued; null
+// when spend is in bounds. A submitted run is counted like any other (its summary row is already on disk).
+function costHalt(lines) {
+  const guard = costGuard();
+  if (!guard) return null;
+  lines.push(`QUEUE_HALTED ${guard.halt} (${guard.text}; every row kept queued)`);
+  notify(`Job queue halted: ${guard.halt} — ${guard.text}`);
+  return { lines, deferred: null, halt: guard.halt };
+}
+
 function discover() {
   return new Promise(resolve => {
     const child = spawn('bun', ['discover.mjs', ...(QUEUE ? ['--queue', QUEUE] : [])], { cwd: HERE, stdio: ['ignore', 'pipe', 'inherit'] });
@@ -292,8 +345,8 @@ async function runPosting(row, slot) {
     const providerDown = run?.outcome !== 'submitted' && /^(driver-error|planner-error)/.test(reason);
     if (!providerDown) providerFailures = 0;
     if (run?.outcome === 'submitted') {
-      lines.push(`SUBMITTED secs=${secs} cost=$${run.cost?.toFixed(4)}`);
-      return { lines, deferred, halt: null };
+      lines.push(`SUBMITTED secs=${secs} cost=${run.cost?.toFixed(4)}`);
+      return costHalt(lines) ?? { lines, deferred, halt: null };
     }
     // A blocked job-board account fails every remaining posting the same way and more traffic prolongs the block:
     // the queue stops here, keeping this posting queued.
@@ -303,6 +356,8 @@ async function runPosting(row, slot) {
       return { lines, deferred: null, halt: 'account-blocked' };
     }
     lines.push(`STOPPED (${reason.slice(0, 200)}) secs=${secs}`);
+    const overBudget = costHalt(lines);
+    if (overBudget) return overBudget;
     // An ATS-wide outage halts dispatch with the posting kept queued: the platform, not this posting, is down.
     if (OUTAGE_STOP.test(reason)) {
       const host = hostOf(row.url);
